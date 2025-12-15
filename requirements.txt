@@ -6,6 +6,7 @@ pandas
 matplotlib
 numpy
 plotly==6.5.0
-sklearn
+sklearn==1.8.0
+
 
 
