@@ -105,7 +105,7 @@ def cargar_datos_desde_gcs():
         return df_completo
         
     except Exception as e:
-        st.error(f"❌ Error de conexión GCS: {str(e)[:100]}")
+        st.error(f"❌ Error de conexión GCS: {str(e)[:1000]}")
         st.info("💡 Usando datos de ejemplo para demostración...")
         return generar_datos_ejemplo()
 
@@ -1097,4 +1097,5 @@ if __name__ == "__main__":
         st.session_state['datos_cargados'] = False
     
     # Ejecutar aplicación
+
     main()
