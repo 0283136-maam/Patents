@@ -5,6 +5,7 @@ google-cloud-storage
 pandas
 matplotlib
 numpy
-plotly
+plotly==6.5.0
 sklearn
+
 
