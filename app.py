@@ -28,13 +28,52 @@ import os
 
 warnings.filterwarnings('ignore')
 
-# Verificar si google-cloud-storage está disponible
+# ============================================================================
+# CONFIGURACIÓN DE AUTENTICACIÓN GCS CON STREAMLIT SECRETS
+# ============================================================================
+
+# Configurar para evitar timeout de metadata service
+os.environ["NO_GCE_CHECK"] = "true"
+
+# Verificar si google-cloud-storage está disponible y configurar autenticación
 try:
     from google.cloud import storage
+    from google.oauth2 import service_account
+    
     GCS_AVAILABLE = True
+    
+    @st.cache_resource
+    def get_gcs_client():
+        """Obtener cliente GCS usando Streamlit Secrets"""
+        try:
+            # Verificar si existen secrets
+            if 'gcp_service_account' in st.secrets:
+                st.sidebar.success("✅ Usando credenciales de Secrets")
+                
+                # Convertir secrets a diccionario
+                creds_dict = dict(st.secrets["gcp_service_account"])
+                
+                # Crear credenciales
+                credentials = service_account.Credentials.from_service_account_info(creds_dict)
+                
+                # Crear cliente
+                client = storage.Client(
+                    credentials=credentials,
+                    project=creds_dict.get('project_id', 'warm-physics-474702-q3')
+                )
+                
+                return client
+            else:
+                st.sidebar.warning("⚠ No se encontraron credenciales en Secrets")
+                return None
+                
+        except Exception as e:
+            st.sidebar.error(f"❌ Error al crear cliente GCS: {str(e)[:100]}")
+            return None
+            
 except ImportError:
     GCS_AVAILABLE = False
-    st.warning("⚠ google-cloud-storage no está instalado. Usando datos de ejemplo.")
+    st.sidebar.warning("⚠ google-cloud-storage no está instalado. Usando datos de ejemplo.")
 
 # Configuración de la página
 st.set_page_config(
@@ -1099,3 +1138,4 @@ if __name__ == "__main__":
     # Ejecutar aplicación
 
     main()
+
