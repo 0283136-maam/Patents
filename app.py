@@ -46,7 +46,7 @@ st.title("📊 Sistema Integrado de Análisis y Predicción de Patentes USPTO")
 st.markdown("---")
 
 # ============================================================================
-# 1. CONFIGURACIÓN Y CACHE DE DATOS
+# 1. CONFIGURACIÓN Y CACHE DE DATOS - CORREGIDO
 # ============================================================================
 
 @st.cache_data(ttl=3600, show_spinner="Cargando datos desde GCS...")
@@ -125,25 +125,101 @@ def generar_datos_ejemplo():
     
     secciones = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
     
+    # CORRECCIÓN: Generar años de manera más realista
+    # Crear distribución de años más realista (más patentes en años recientes)
+    years = list(range(2006, 2022))
+    year_weights = [0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 
+                    0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17]
+    year_weights = [w/sum(year_weights) for w in year_weights]
+    
     datos = {
         'assignee_country': np.random.choice(paises, n, p=pesos),
         'section': np.random.choice(secciones, n),
-        'patent_date': pd.date_range('2006-01-01', '2021-12-31', periods=n),
+        'year': np.random.choice(years, n, p=year_weights),
         'num_claims': np.random.randint(1, 50, n),
         'classification_level': np.random.choice(['MAIN', 'FURTHER'], n, p=[0.8, 0.2]),
         'ipc_class': [f'{"ABCDEFGH"[np.random.randint(0,8)]}{np.random.randint(10, 99):02d}' for _ in range(n)]
     }
     
     df = pd.DataFrame(datos)
-    df['year'] = df['patent_date'].dt.year
+    # Crear fecha de patente basada en el año
+    df['patent_date'] = pd.to_datetime(df['year'].astype(str) + '-01-01') + pd.to_timedelta(np.random.randint(0, 365, n), unit='D')
     
     st.success(f"📋 Datos de ejemplo generados: {len(df):,} registros (2006-2021)")
     
     return df
 
 @st.cache_data
+def limpiar_y_preparar_datos(df):
+    """Limpia y prepara datos, eliminando duplicados"""
+    
+    # Crear una copia para no modificar el original
+    df_clean = df.copy()
+    
+    # Si no hay columna 'id', crear una basada en las columnas principales
+    if 'id' not in df_clean.columns:
+        # Crear un ID único basado en las columnas principales
+        columns_for_id = ['assignee_country', 'section', 'patent_date', 'num_claims']
+        columns_for_id = [col for col in columns_for_id if col in df_clean.columns]
+        
+        if columns_for_id:
+            # Crear una cadena combinada para identificar duplicados
+            df_clean['temp_id'] = df_clean[columns_for_id].astype(str).agg('_'.join, axis=1)
+        else:
+            df_clean['temp_id'] = df_clean.index.astype(str)
+    
+    # Eliminar duplicados basados en el ID temporal
+    antes = len(df_clean)
+    if 'temp_id' in df_clean.columns:
+        df_clean = df_clean.drop_duplicates(subset=['temp_id'])
+        df_clean = df_clean.drop(columns=['temp_id'])
+    
+    despues = len(df_clean)
+    
+    if antes > despues:
+        st.info(f"🧹 Eliminados {antes - despues} registros duplicados")
+    
+    return df_clean
+
+def verificar_y_corregir_datos_acumulados(df_agregado):
+    """Verifica si los datos están acumulados y los corrige si es necesario"""
+    
+    df_corregido = df_agregado.copy()
+    
+    # Verificar para cada país si los datos parecen acumulados
+    for pais in df_corregido['assignee_country'].unique():
+        datos_pais = df_corregido[df_corregido['assignee_country'] == pais].sort_values('year')
+        
+        if len(datos_pais) > 1:
+            # Calcular diferencias entre años consecutivos
+            valores = datos_pais['num_patentes'].values
+            diferencias = np.diff(valores)
+            
+            # Si todas las diferencias son positivas y los valores solo aumentan,
+            # probablemente son datos acumulados
+            if all(diff >= 0 for diff in diferencias) and valores[-1] > valores[0] * 3:
+                # Convertir de acumulado a anual
+                valores_anuales = np.zeros_like(valores, dtype=float)
+                valores_anuales[0] = valores[0]
+                
+                for i in range(1, len(valores)):
+                    valores_anuales[i] = valores[i] - valores[i-1]
+                
+                # Asegurar que no haya valores negativos
+                valores_anuales = np.maximum(valores_anuales, 0)
+                
+                # Actualizar los valores en el DataFrame
+                indices_pais = datos_pais.index
+                df_corregido.loc[indices_pais, 'num_patentes'] = valores_anuales
+                
+                if st.session_state.get('debug_mode', False):
+                    st.write(f"🔄 Corregidos datos acumulados para {pais}")
+    
+    return df_corregido
+
+@st.cache_data
 def preparar_datos_visualizacion(df):
-    """Prepara datos para visualizaciones"""
+    """Prepara datos para visualizaciones - CORREGIDO para evitar datos acumulados"""
     
     # Asegurar columnas necesarias
     if 'year' not in df.columns and 'patent_date' in df.columns:
@@ -167,17 +243,59 @@ def preparar_datos_visualizacion(df):
     if 'section' in df.columns:
         df['section_name'] = df['section'].map(seccion_dict)
     
-    # Crear datos agregados por país y año
-    df_agregado = df.groupby(['assignee_country', 'year']).agg({
-        'assignee_country': 'count',
-        'num_claims': 'mean',
-        'section': lambda x: x.nunique()
-    }).rename(columns={'assignee_country': 'num_patentes'}).reset_index()
+    # CORRECCIÓN: Crear datos agregados por país y año - CONTAR, NO SUMAR
+    # Usamos size() para contar el número de registros por grupo
+    conteo_por_año = df.groupby(['assignee_country', 'year']).size().reset_index(name='num_patentes')
+    
+    # Obtener el promedio de num_claims por grupo
+    promedio_claims = df.groupby(['assignee_country', 'year'])['num_claims'].mean().reset_index(name='avg_claims')
+    
+    # Obtener número de secciones únicas por grupo
+    if 'section' in df.columns:
+        secciones_unicas = df.groupby(['assignee_country', 'year'])['section'].nunique().reset_index(name='unique_sections')
+    else:
+        secciones_unicas = pd.DataFrame({
+            'assignee_country': conteo_por_año['assignee_country'],
+            'year': conteo_por_año['year'],
+            'unique_sections': 1
+        })
+    
+    # Combinar todos los datos
+    df_agregado = conteo_por_año.merge(promedio_claims, on=['assignee_country', 'year'], how='left')
+    df_agregado = df_agregado.merge(secciones_unicas, on=['assignee_country', 'year'], how='left')
+    
+    # Llenar valores NaN
+    df_agregado['avg_claims'] = df_agregado['avg_claims'].fillna(df_agregado['avg_claims'].mean())
+    df_agregado['unique_sections'] = df_agregado['unique_sections'].fillna(1)
+    
+    # Verificar si los datos parecen acumulados
+    df_agregado = verificar_y_corregir_datos_acumulados(df_agregado)
+    
+    # Ordenar por país y año
+    df_agregado = df_agregado.sort_values(['assignee_country', 'year'])
+    
+    # Modo debug: mostrar ejemplos
+    if st.session_state.get('debug_mode', False):
+        st.write("🔍 Modo Debug - Datos Agregados:")
+        
+        # Mostrar algunos ejemplos
+        for pais in df_agregado['assignee_country'].unique()[:2]:
+            datos_pais = df_agregado[df_agregado['assignee_country'] == pais].sort_values('year')
+            st.write(f"📊 Datos para {pais}:")
+            st.dataframe(datos_pais[['year', 'num_patentes', 'avg_claims']].head())
+            
+            # Verificar si parece acumulado
+            valores = datos_pais['num_patentes'].values
+            if len(valores) > 1:
+                creciente = all(valores[i] <= valores[i+1] for i in range(len(valores)-1))
+                st.write(f"  - ¿Valores crecientes? {creciente}")
+                st.write(f"  - Primer valor: {valores[0]}, Último valor: {valores[-1]}")
+                st.write(f"  - Diferencia: {valores[-1] - valores[0]}")
     
     return df, df_agregado
 
 # ============================================================================
-# 2. FUNCIONES DE VISUALIZACIÓN CON PLOTLY
+# 2. FUNCIONES DE VISUALIZACIÓN CON PLOTLY - CORREGIDAS
 # ============================================================================
 
 def crear_mapa_mundial_interactivo(df_agregado, year=None, section=None, df_original=None):
@@ -243,63 +361,59 @@ def crear_mapa_mundial_interactivo(df_agregado, year=None, section=None, df_orig
     
     return fig
 
-def grafico_tendencia_anual_interactivo(df_agregado, pais=None, seccion=None, df_original=None):
-    """Gráfico de evolución anual de patentes con Plotly"""
+def crear_grafico_tendencia_corregido(df_agregado, pais=None, seccion=None, df_original=None):
+    """Crea gráfico de tendencia con datos corregidos (no acumulados)"""
     
-    datos = df_agregado.copy()
-    
-    # Filtrar por país
     if pais:
-        datos = datos[datos['assignee_country'] == pais]
-    
-    # Filtrar por sección
-    if seccion and df_original is not None:
+        datos = df_agregado[df_agregado['assignee_country'] == pais].sort_values('year')
+        titulo = f"📈 Evolución Anual de Patentes - {pais}"
+    elif seccion and df_original is not None:
+        # Filtrar por sección
         datos_seccion = df_original[df_original['section'] == seccion]
         datos = datos_seccion.groupby(['year']).size().reset_index(name='num_patentes')
-    
-    # Agrupar por año si no estamos filtrando por país
-    if not pais and not seccion:
-        datos = datos.groupby('year')['num_patentes'].sum().reset_index()
-    
-    # Título
-    titulo = "📈 Evolución Anual de Patentes"
-    if pais:
-        titulo += f" - {pais}"
-    if seccion:
         nombres = {'A': 'Necesidades', 'B': 'Operaciones', 'C': 'Química',
                   'D': 'Textiles', 'E': 'Construcción', 'F': 'Mecánica',
                   'G': 'Física', 'H': 'Electricidad'}
-        titulo += f" - Sección {seccion} ({nombres.get(seccion, seccion)})"
+        titulo = f"📈 Evolución Anual - Sección {seccion} ({nombres.get(seccion, seccion)})"
+    else:
+        # Sumar por año para todos los países (no acumulado, datos anuales reales)
+        datos = df_agregado.groupby('year')['num_patentes'].sum().reset_index()
+        titulo = "📈 Evolución Anual Total de Patentes"
     
-    # Crear gráfico con Plotly
+    # Asegurar que los datos están ordenados por año
+    datos = datos.sort_values('year')
+    
     fig = px.line(
         datos,
         x='year',
         y='num_patentes',
         title=titulo,
-        markers=True,
-        line_shape='spline'
+        markers=True
     )
     
-    # Añadir área sombreada
-    fig.add_trace(go.Scatter(
+    # Añadir barras para mayor claridad
+    fig.add_trace(go.Bar(
         x=datos['year'],
         y=datos['num_patentes'],
-        fill='tozeroy',
-        fillcolor='rgba(100, 149, 237, 0.2)',
-        line=dict(color='rgba(255, 255, 255, 0)'),
-        showlegend=False,
-        hoverinfo='skip'
+        name='Patentes por año',
+        opacity=0.3,
+        marker_color='lightblue'
     ))
     
     fig.update_layout(
         xaxis_title="Año",
         yaxis_title="Número de Patentes",
         hovermode='x unified',
-        height=450
+        height=400
     )
     
     return fig
+
+def grafico_tendencia_anual_interactivo(df_agregado, pais=None, seccion=None, df_original=None):
+    """Gráfico de evolución anual de patentes con Plotly"""
+    
+    # Usar la función corregida
+    return crear_grafico_tendencia_corregido(df_agregado, pais, seccion, df_original)
 
 # ============================================================================
 # 3. ENSEMBLE LEARNING PARA STREAMLIT - CORREGIDO
@@ -382,8 +496,8 @@ class EnsemblePredictorStreamlit:
                         'year_actual': fila_actual['year'],
                         'country_encoded': fila_actual['country_encoded'],
                         'num_patentes_actual': fila_actual['num_patentes'],
-                        'avg_claims': fila_actual['num_claims'],
-                        'sections_unique': fila_actual['section'],
+                        'avg_claims': fila_actual['avg_claims'],
+                        'sections_unique': fila_actual['unique_sections'],
                         'mean_3y': historico['num_patentes'].mean() if len(historico) > 0 else 0,
                         'std_3y': historico['num_patentes'].std() if len(historico) > 0 else 0,
                         'growth_3y': historico['growth_rate'].mean() if 'growth_rate' in historico.columns and len(historico) > 0 else 0,
@@ -520,8 +634,8 @@ class EnsemblePredictorStreamlit:
                     'country_encoded': country_encoded,
                     'year_actual': año_futuro,
                     'num_patentes_actual': ultimos_datos['num_patentes'],
-                    'avg_claims': ultimos_datos['num_claims'],
-                    'sections_unique': ultimos_datos['section'],
+                    'avg_claims': ultimos_datos['avg_claims'],
+                    'sections_unique': ultimos_datos['unique_sections'],
                     'mean_3y': datos_pais['num_patentes'].tail(3).mean(),
                     'std_3y': datos_pais['num_patentes'].tail(3).std(),
                     'growth_3y': datos_pais['growth_rate'].tail(3).mean() if 'growth_rate' in datos_pais.columns else 0.03
@@ -638,7 +752,7 @@ def visualizar_predicciones_interactivas(df_predicciones):
     return fig1, fig2
 
 # ============================================================================
-# 4. APLICACIÓN PRINCIPAL STREAMLIT
+# 4. APLICACIÓN PRINCIPAL STREAMLIT - CORREGIDA
 # ============================================================================
 
 def main():
@@ -650,6 +764,12 @@ def main():
         st.markdown("---")
         
         st.subheader("⚙️ Configuración")
+        
+        # Opción para modo debug
+        if st.checkbox("🔧 Modo Debug", value=False, key="debug_checkbox"):
+            st.session_state['debug_mode'] = True
+        else:
+            st.session_state['debug_mode'] = False
         
         # Selector de modo de datos
         modo_datos = st.radio(
@@ -666,6 +786,8 @@ def main():
                 else:
                     with st.spinner("Cargando datos desde GCS..."):
                         df_original = cargar_datos_desde_gcs()
+                        # CORRECCIÓN: Limpiar datos antes de prepararlos
+                        df_original = limpiar_y_preparar_datos(df_original)
                         df_original, df_agregado = preparar_datos_visualizacion(df_original)
                         
                         # Guardar en session state
@@ -673,9 +795,23 @@ def main():
                         st.session_state['df_agregado'] = df_agregado
                         
                         st.success("✅ Datos cargados exitosamente!")
+                        
+                        # Mostrar estadísticas si está en modo debug
+                        if st.session_state.get('debug_mode', False):
+                            st.write("📊 Estadísticas de datos cargados:")
+                            st.write(f"- Total registros: {len(df_original):,}")
+                            st.write(f"- Años cubiertos: {df_original['year'].min()} - {df_original['year'].max()}")
+                            st.write(f"- Países únicos: {df_original['assignee_country'].nunique()}")
+                            
+                            # Mostrar distribución por año
+                            st.write("📈 Distribución por año:")
+                            year_dist = df_original['year'].value_counts().sort_index()
+                            st.bar_chart(year_dist)
             else:
                 with st.spinner("Generando datos de ejemplo..."):
                     df_original = generar_datos_ejemplo()
+                    # CORRECCIÓN: Limpiar datos antes de prepararlos
+                    df_original = limpiar_y_preparar_datos(df_original)
                     df_original, df_agregado = preparar_datos_visualizacion(df_original)
                     
                     # Guardar en session state
@@ -683,6 +819,18 @@ def main():
                     st.session_state['df_agregado'] = df_agregado
                     
                     st.success("✅ Datos de ejemplo generados exitosamente!")
+                    
+                    # Mostrar estadísticas si está en modo debug
+                    if st.session_state.get('debug_mode', False):
+                        st.write("📊 Estadísticas de datos:")
+                        st.write(f"- Total registros: {len(df_original):,}")
+                        st.write(f"- Años cubiertos: {df_original['year'].min()} - {df_original['year'].max()}")
+                        st.write(f"- Países únicos: {df_original['assignee_country'].nunique()}")
+                        
+                        # Mostrar distribución por año
+                        st.write("📈 Distribución por año:")
+                        year_dist = df_original['year'].value_counts().sort_index()
+                        st.bar_chart(year_dist)
         
         st.markdown("---")
         st.subheader("📊 Navegación")
@@ -756,9 +904,11 @@ def main():
                 )
             
             with col3:
+                # CORRECCIÓN: Sumar num_patentes (que ahora son datos anuales, no acumulados)
+                total_patentes = df_agregado['num_patentes'].sum()
                 st.metric(
                     label="Patentes Totales",
-                    value=f"{df_agregado['num_patentes'].sum():,.0f}"
+                    value=f"{total_patentes:,.0f}"
                 )
     
     elif pagina_seleccionada == "📈 Análisis Histórico":
@@ -770,6 +920,10 @@ def main():
         
         df_agregado = st.session_state['df_agregado']
         df_original = st.session_state['df_original']
+        
+        # Mostrar advertencia si está en modo debug
+        if st.session_state.get('debug_mode', False):
+            st.info("🔍 Modo Debug activado: Se mostrarán detalles técnicos")
         
         # Pestañas para diferentes tipos de análisis
         tab1, tab2, tab3 = st.tabs([
@@ -831,12 +985,39 @@ def main():
                 else:
                     seccion_filtro = 'Todas'
             
-            # Generar gráfico
-            pais = None if pais_filtro == 'Todos' else pais_filtro
-            seccion = None if seccion_filtro == 'Todas' else seccion_filtro
+            # Generar gráfico CORREGIDO
+            if pais_filtro == 'Todos' and seccion_filtro == 'Todas':
+                # Mostrar total por año
+                fig_tendencia = crear_grafico_tendencia_corregido(df_agregado)
+            elif pais_filtro != 'Todos':
+                # Mostrar para país específico
+                fig_tendencia = crear_grafico_tendencia_corregido(df_agregado, pais_filtro)
+            else:
+                # Mostrar para sección específica
+                fig_tendencia = crear_grafico_tendencia_corregido(df_agregado, seccion=seccion_filtro, df_original=df_original)
             
-            fig_tendencia = grafico_tendencia_anual_interactivo(df_agregado, pais, seccion, df_original)
             st.plotly_chart(fig_tendencia, use_container_width=True)
+            
+            # Mostrar tabla de datos para verificación
+            if st.checkbox("📋 Mostrar datos de tendencia", value=False, key="mostrar_datos_tendencia"):
+                if pais_filtro == 'Todos' and seccion_filtro == 'Todas':
+                    datos_tabla = df_agregado.groupby('year').agg({
+                        'num_patentes': 'sum',
+                        'avg_claims': 'mean'
+                    }).reset_index()
+                elif pais_filtro != 'Todos':
+                    datos_tabla = df_agregado[df_agregado['assignee_country'] == pais_filtro]
+                else:
+                    datos_seccion = df_original[df_original['section'] == seccion_filtro]
+                    datos_tabla = datos_seccion.groupby('year').size().reset_index(name='num_patentes')
+                
+                st.dataframe(
+                    datos_tabla.style.format({
+                        'num_patentes': '{:,.0f}',
+                        'avg_claims': '{:.1f}'
+                    }),
+                    use_container_width=True
+                )
         
         with tab3:
             st.subheader("Estadísticas Detalladas")
@@ -855,14 +1036,18 @@ def main():
                 )
             
             with col2:
+                # CORRECCIÓN: Sumar datos anuales (no acumulados)
+                total_patentes = df_agregado['num_patentes'].sum()
                 st.metric(
                     label="Total Patentes",
-                    value=f"{df_agregado['num_patentes'].sum():,.0f}"
+                    value=f"{total_patentes:,.0f}"
                 )
                 
+                # CORRECCIÓN: Promedio por año (datos anuales reales)
+                promedio_anual = df_agregado.groupby('year')['num_patentes'].sum().mean()
                 st.metric(
                     label="Patentes/Año Promedio",
-                    value=f"{df_agregado.groupby('year')['num_patentes'].sum().mean():,.0f}"
+                    value=f"{promedio_anual:,.0f}"
                 )
             
             with col3:
@@ -883,6 +1068,7 @@ def main():
             # Top 10 países
             st.subheader("🏆 Top 10 Países por Patentes Totales")
             
+            # CORRECCIÓN: Sumar datos anuales (no acumulados)
             top_paises = df_agregado.groupby('assignee_country')['num_patentes'].sum().nlargest(10)
             
             # Crear DataFrame para visualización
@@ -1125,9 +1311,11 @@ def main():
                     )
                 
                 with col2:
+                    # CORRECCIÓN: Sumar datos anuales (no acumulados)
+                    total_patentes_pais = datos_pais['num_patentes'].sum()
                     st.metric(
                         label="Total Patentes",
-                        value=f"{int(datos_pais['num_patentes'].sum()):,}"
+                        value=f"{int(total_patentes_pais):,}"
                     )
                 
                 with col3:
@@ -1184,6 +1372,8 @@ if __name__ == "__main__":
     # Inicializar session state si no existe
     if 'datos_cargados' not in st.session_state:
         st.session_state['datos_cargados'] = False
+    if 'debug_mode' not in st.session_state:
+        st.session_state['debug_mode'] = False
     
     # Ejecutar aplicación
     main()
