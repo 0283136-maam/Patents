@@ -302,7 +302,7 @@ def grafico_tendencia_anual_interactivo(df_agregado, pais=None, seccion=None, df
     return fig
 
 # ============================================================================
-# 3. ENSEMBLE LEARNING PARA STREAMLIT
+# 3. ENSEMBLE LEARNING PARA STREAMLIT - CORREGIDO
 # ============================================================================
 
 class EnsemblePredictorStreamlit:
@@ -387,18 +387,38 @@ class EnsemblePredictorStreamlit:
                         'mean_3y': historico['num_patentes'].mean() if len(historico) > 0 else 0,
                         'std_3y': historico['num_patentes'].std() if len(historico) > 0 else 0,
                         'growth_3y': historico['growth_rate'].mean() if 'growth_rate' in historico.columns and len(historico) > 0 else 0,
-                        'target_6y': datos_pais.iloc[i+6]['num_patentes'] if i+6 < len(datos_pais) else None
                     }
+                    
+                    # CORRECCIÓN: Asegurar que existe el target
+                    if i + horizonte < len(datos_pais):
+                        muestra[f'target_{horizonte}y'] = datos_pais.iloc[i + horizonte]['num_patentes']
+                    else:
+                        muestra[f'target_{horizonte}y'] = None
                     
                     muestras.append(muestra)
         
         df_entrenamiento = pd.DataFrame(muestras)
         df_entrenamiento = df_entrenamiento.dropna()
         
+        # CORRECCIÓN: Verificar que la columna target existe
+        target_col = f'target_{horizonte}y'
+        if target_col not in df_entrenamiento.columns:
+            st.warning(f"⚠ No se pudo crear la columna {target_col}")
+            # Crear una columna dummy usando num_patentes_actual
+            df_entrenamiento[target_col] = df_entrenamiento['num_patentes_actual']
+        
         return df_entrenamiento
     
     def entrenar_modelos(self, df_entrenamiento, horizonte=6):
         """Entrena los modelos ensemble"""
+        
+        # CORRECCIÓN: Verificar que la columna target existe primero
+        target_col = f'target_{horizonte}y'
+        
+        if target_col not in df_entrenamiento.columns:
+            st.error(f"❌ Error: La columna '{target_col}' no existe en los datos de entrenamiento")
+            st.write("📋 Columnas disponibles:", df_entrenamiento.columns.tolist())
+            return None, None, None
         
         # Preparar características y target
         feature_cols = [
@@ -411,7 +431,12 @@ class EnsemblePredictorStreamlit:
         self.feature_columns = available_cols
         
         X = df_entrenamiento[available_cols]
-        y = df_entrenamiento[f'target_{horizonte}y']
+        y = df_entrenamiento[target_col]  # Usar target_col
+        
+        # Verificar que tenemos datos suficientes
+        if len(X) < 10:
+            st.error(f"❌ Datos insuficientes para entrenamiento: solo {len(X)} muestras")
+            return None, None, None
         
         # Dividir datos
         X_train, X_test, y_train, y_test = train_test_split(
@@ -426,32 +451,37 @@ class EnsemblePredictorStreamlit:
         resultados = {}
         
         for nombre, modelo in self.models.items():
-            # Validación cruzada simplificada para Streamlit
-            cv_scores = cross_val_score(modelo, X_train_scaled, y_train, 
-                                       cv=3, scoring='r2', n_jobs=-1)  # Reducido a 3 folds
-            
-            # Entrenar modelo final
-            modelo.fit(X_train_scaled, y_train)
-            
-            # Evaluar en test
-            y_pred = modelo.predict(X_test_scaled)
-            
-            mae = mean_absolute_error(y_test, y_pred)
-            rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-            r2 = r2_score(y_test, y_pred)
-            
-            self.metrics[nombre] = {
-                'cv_mean_r2': cv_scores.mean(),
-                'cv_std_r2': cv_scores.std(),
-                'test_mae': mae,
-                'test_rmse': rmse,
-                'test_r2': r2
-            }
-            
-            resultados[nombre] = {
-                'model': modelo,
-                'cv_scores': cv_scores
-            }
+            try:
+                # Validación cruzada simplificada para Streamlit
+                cv_scores = cross_val_score(modelo, X_train_scaled, y_train, 
+                                           cv=3, scoring='r2', n_jobs=-1)
+                
+                # Entrenar modelo final
+                modelo.fit(X_train_scaled, y_train)
+                
+                # Evaluar en test
+                y_pred = modelo.predict(X_test_scaled)
+                
+                mae = mean_absolute_error(y_test, y_pred)
+                rmse = np.sqrt(mean_squared_error(y_test, y_pred))
+                r2 = r2_score(y_test, y_pred)
+                
+                self.metrics[nombre] = {
+                    'cv_mean_r2': cv_scores.mean(),
+                    'cv_std_r2': cv_scores.std(),
+                    'test_mae': mae,
+                    'test_rmse': rmse,
+                    'test_r2': r2
+                }
+                
+                resultados[nombre] = {
+                    'model': modelo,
+                    'cv_scores': cv_scores
+                }
+                
+            except Exception as e:
+                st.error(f"❌ Error entrenando {nombre}: {str(e)}")
+                continue
         
         return X_test, y_test, resultados
     
@@ -478,6 +508,7 @@ class EnsemblePredictorStreamlit:
             try:
                 country_encoded = self.encoder.transform([pais])[0]
             except:
+                # Si el país no está en el encoder, usar un valor por defecto
                 continue
             
             # Generar predicciones para cada año futuro
@@ -500,39 +531,54 @@ class EnsemblePredictorStreamlit:
                 df_features = pd.DataFrame([features])
                 
                 # Asegurar todas las columnas
-                for col in self.feature_columns:
-                    if col not in df_features.columns:
-                        df_features[col] = 0
+                if self.feature_columns:
+                    for col in self.feature_columns:
+                        if col not in df_features.columns:
+                            df_features[col] = 0
+                
+                # Verificar que tenemos las columnas necesarias
+                if not self.feature_columns:
+                    st.error("❌ No se han definido las columnas de características")
+                    continue
                 
                 # Escalar y predecir
                 X_pred = df_features[self.feature_columns]
                 X_pred_scaled = self.scaler.transform(X_pred)
                 
                 # Predicción ensemble ponderada
-                pred_rf = self.models['random_forest'].predict(X_pred_scaled)[0]
-                pred_gb = self.models['gradient_boosting'].predict(X_pred_scaled)[0]
-                pred_ensemble = pred_rf * self.ensemble_weights['random_forest'] + \
-                               pred_gb * self.ensemble_weights['gradient_boosting']
-                
-                # Asegurar predicción no negativa
-                pred_final = max(10, pred_ensemble)
-                
-                # Determinar tendencia
-                if año_offset == 1:
-                    tendencia = 'crecimiento' if pred_final > ultimos_datos['num_patentes'] else 'decrecimiento'
-                else:
-                    pred_anterior = next((p['prediccion_patentes'] for p in predicciones 
-                                        if p['pais'] == pais and p['año'] == año_futuro-1), ultimos_datos['num_patentes'])
-                    tendencia = 'crecimiento' if pred_final > pred_anterior else 'decrecimiento'
-                
-                predicciones.append({
-                    'pais': pais,
-                    'año': año_futuro,
-                    'años_desde_2021': año_offset,
-                    'prediccion_patentes': round(pred_final),
-                    'tendencia': tendencia,
-                    'confidence': 'alta' if año_offset <= 3 else 'media'
-                })
+                try:
+                    pred_rf = self.models['random_forest'].predict(X_pred_scaled)[0]
+                    pred_gb = self.models['gradient_boosting'].predict(X_pred_scaled)[0]
+                    pred_ensemble = pred_rf * self.ensemble_weights['random_forest'] + \
+                                   pred_gb * self.ensemble_weights['gradient_boosting']
+                    
+                    # Asegurar predicción no negativa
+                    pred_final = max(10, pred_ensemble)
+                    
+                    # Determinar tendencia
+                    if año_offset == 1:
+                        tendencia = 'crecimiento' if pred_final > ultimos_datos['num_patentes'] else 'decrecimiento'
+                    else:
+                        pred_anterior = next((p['prediccion_patentes'] for p in predicciones 
+                                            if p['pais'] == pais and p['año'] == año_futuro-1), ultimos_datos['num_patentes'])
+                        tendencia = 'crecimiento' if pred_final > pred_anterior else 'decrecimiento'
+                    
+                    predicciones.append({
+                        'pais': pais,
+                        'año': año_futuro,
+                        'años_desde_2021': año_offset,
+                        'prediccion_patentes': round(pred_final),
+                        'tendencia': tendencia,
+                        'confidence': 'alta' if año_offset <= 3 else 'media'
+                    })
+                    
+                except Exception as e:
+                    st.warning(f"⚠ Error prediciendo para {pais} en {año_futuro}: {str(e)}")
+                    continue
+        
+        if not predicciones:
+            st.error("❌ No se pudieron generar predicciones")
+            return pd.DataFrame()
         
         df_predicciones = pd.DataFrame(predicciones)
         
@@ -541,8 +587,16 @@ class EnsemblePredictorStreamlit:
 def visualizar_predicciones_interactivas(df_predicciones):
     """Visualizaciones interactivas para predicciones"""
     
+    if df_predicciones.empty:
+        st.warning("⚠ No hay predicciones para visualizar")
+        return None, None
+    
     # 1. Gráfico de barras para 2031
     pred_2031 = df_predicciones[df_predicciones['año'] == 2031].sort_values('prediccion_patentes', ascending=False).head(10)
+    
+    if pred_2031.empty:
+        st.info("ℹ️ No hay predicciones para 2031")
+        return None, None
     
     fig1 = px.bar(
         pred_2031,
@@ -882,49 +936,69 @@ def main():
                     value=10
                 )
             
+            # CORRECCIÓN: Mejor manejo del botón de entrenamiento
             if st.button("🚀 Entrenar Modelos y Generar Predicciones", type="primary", use_container_width=True):
                 
                 with st.spinner("Entrenando modelos..."):
-                    # Inicializar predictor
-                    ensemble_model = EnsemblePredictorStreamlit()
-                    
-                    # Preparar datos
-                    datos_preparados = ensemble_model.preparar_datos_para_prediccion(df_agregado)
-                    
-                    # Crear dataset de entrenamiento
-                    df_entrenamiento = ensemble_model.crear_dataset_entrenamiento(datos_preparados, horizonte_prediccion)
-                    
-                    # Entrenar modelos
-                    X_test, y_test, resultados = ensemble_model.entrenar_modelos(df_entrenamiento, horizonte_prediccion)
-                    
-                    # Generar predicciones futuras
-                    top_paises = df_agregado.groupby('assignee_country')['num_patentes'].sum().nlargest(num_paises_prediccion).index
-                    df_predicciones = ensemble_model.predecir_futuro(
-                        df_agregado, años_futuros=10, países_interes=top_paises.tolist()
-                    )
-                    
-                    # Guardar en session state
-                    st.session_state['ensemble_model'] = ensemble_model
-                    st.session_state['df_predicciones'] = df_predicciones
-                    st.session_state['resultados_entrenamiento'] = resultados
-                    
-                    st.success("✅ ¡Modelos entrenados y predicciones generadas exitosamente!")
-                    
-                    # Mostrar métricas rápidas
-                    if ensemble_model.metrics:
-                        st.subheader("📊 Métricas del Modelo")
+                    try:
+                        # Inicializar predictor
+                        ensemble_model = EnsemblePredictorStreamlit()
                         
-                        col1, col2 = st.columns(2)
+                        # Preparar datos
+                        datos_preparados = ensemble_model.preparar_datos_para_prediccion(df_agregado)
                         
-                        with col1:
-                            rf_metrics = ensemble_model.metrics.get('random_forest', {})
-                            st.metric("Random Forest R²", f"{rf_metrics.get('test_r2', 0):.3f}")
-                            st.metric("Random Forest MAE", f"{rf_metrics.get('test_mae', 0):.2f}")
+                        # Crear dataset de entrenamiento con el horizonte correcto
+                        df_entrenamiento = ensemble_model.crear_dataset_entrenamiento(
+                            datos_preparados, 
+                            horizonte=horizonte_prediccion
+                        )
                         
-                        with col2:
-                            gb_metrics = ensemble_model.metrics.get('gradient_boosting', {})
-                            st.metric("Gradient Boosting R²", f"{gb_metrics.get('test_r2', 0):.3f}")
-                            st.metric("Gradient Boosting MAE", f"{gb_metrics.get('test_mae', 0):.2f}")
+                        # Verificar que df_entrenamiento no está vacío
+                        if df_entrenamiento.empty:
+                            st.error("❌ No hay suficientes datos para entrenar el modelo con este horizonte.")
+                            st.info("💡 Intenta con un horizonte de predicción más corto o usa más países.")
+                        else:
+                            st.info(f"📊 Dataset de entrenamiento creado: {len(df_entrenamiento)} muestras")
+                            
+                            # Entrenar modelos usando el mismo horizonte
+                            X_test, y_test, resultados = ensemble_model.entrenar_modelos(
+                                df_entrenamiento, 
+                                horizonte=horizonte_prediccion
+                            )
+                            
+                            if resultados is not None:  # Solo continuar si el entrenamiento fue exitoso
+                                # Generar predicciones futuras
+                                top_paises = df_agregado.groupby('assignee_country')['num_patentes'].sum().nlargest(num_paises_prediccion).index
+                                df_predicciones = ensemble_model.predecir_futuro(
+                                    df_agregado, años_futuros=10, países_interes=top_paises.tolist()
+                                )
+                                
+                                # Guardar en session state
+                                st.session_state['ensemble_model'] = ensemble_model
+                                st.session_state['df_predicciones'] = df_predicciones
+                                st.session_state['resultados_entrenamiento'] = resultados
+                                
+                                st.success("✅ ¡Modelos entrenados y predicciones generadas exitosamente!")
+                                
+                                # Mostrar métricas rápidas
+                                if ensemble_model.metrics:
+                                    st.subheader("📊 Métricas del Modelo")
+                                    
+                                    col1, col2 = st.columns(2)
+                                    
+                                    with col1:
+                                        rf_metrics = ensemble_model.metrics.get('random_forest', {})
+                                        st.metric("Random Forest R²", f"{rf_metrics.get('test_r2', 0):.3f}")
+                                        st.metric("Random Forest MAE", f"{rf_metrics.get('test_mae', 0):.2f}")
+                                    
+                                    with col2:
+                                        gb_metrics = ensemble_model.metrics.get('gradient_boosting', {})
+                                        st.metric("Gradient Boosting R²", f"{gb_metrics.get('test_r2', 0):.3f}")
+                                        st.metric("Gradient Boosting MAE", f"{gb_metrics.get('test_mae', 0):.2f}")
+                            
+                    except Exception as e:
+                        st.error(f"❌ Error durante el entrenamiento: {str(e)}")
+                        st.info("💡 Intenta con diferentes parámetros o verifica tus datos.")
         
         with tab2:
             st.subheader("Visualización de Predicciones")
@@ -934,65 +1008,75 @@ def main():
             else:
                 df_predicciones = st.session_state['df_predicciones']
                 
-                # Mostrar resumen
-                pred_2031 = df_predicciones[df_predicciones['año'] == 2031].sort_values('prediccion_patentes', ascending=False)
-                
-                st.subheader("📊 Resumen de Predicciones 2031")
-                
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.metric(
-                        label="Total Predicho",
-                        value=f"{int(pred_2031['prediccion_patentes'].sum()):,}"
-                    )
-                
-                with col2:
-                    st.metric(
-                        label="Países con Crecimiento",
-                        value=f"{(pred_2031['tendencia'] == 'crecimiento').sum()}"
-                    )
-                
-                with col3:
-                    st.metric(
-                        label="Países Analizados",
-                        value=f"{df_predicciones['pais'].nunique()}"
-                    )
-                
-                # Mostrar visualizaciones
-                fig1, fig2 = visualizar_predicciones_interactivas(df_predicciones)
-                
-                st.plotly_chart(fig1, use_container_width=True)
-                st.plotly_chart(fig2, use_container_width=True)
-                
-                # Tabla detallada de predicciones
-                st.subheader("📋 Datos Detallados de Predicciones")
-                
-                año_filtro = st.selectbox(
-                    "Filtrar por año:",
-                    options=['Todos'] + sorted(df_predicciones['año'].unique().tolist()),
-                    index=0
-                )
-                
-                if año_filtro == 'Todos':
-                    datos_filtrados = df_predicciones
+                if df_predicciones.empty:
+                    st.warning("⚠ No hay predicciones disponibles. Intenta entrenar los modelos nuevamente.")
                 else:
-                    datos_filtrados = df_predicciones[df_predicciones['año'] == int(año_filtro)]
-                
-                st.dataframe(
-                    datos_filtrados.sort_values(['año', 'prediccion_patentes'], ascending=[True, False]).rename(
-                        columns={
-                            'pais': 'País',
-                            'año': 'Año',
-                            'prediccion_patentes': 'Patentes Predichas',
-                            'tendencia': 'Tendencia',
-                            'confidence': 'Confianza'
-                        }
-                    ).style.format({
-                        'Patentes Predichas': '{:,.0f}'
-                    }),
-                    use_container_width=True
-                )
+                    # Mostrar resumen
+                    pred_2031 = df_predicciones[df_predicciones['año'] == 2031].sort_values('prediccion_patentes', ascending=False)
+                    
+                    if not pred_2031.empty:
+                        st.subheader("📊 Resumen de Predicciones 2031")
+                        
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            st.metric(
+                                label="Total Predicho",
+                                value=f"{int(pred_2031['prediccion_patentes'].sum()):,}"
+                            )
+                        
+                        with col2:
+                            st.metric(
+                                label="Países con Crecimiento",
+                                value=f"{(pred_2031['tendencia'] == 'crecimiento').sum()}"
+                            )
+                        
+                        with col3:
+                            st.metric(
+                                label="Países Analizados",
+                                value=f"{df_predicciones['pais'].nunique()}"
+                            )
+                        
+                        # Mostrar visualizaciones
+                        fig1, fig2 = visualizar_predicciones_interactivas(df_predicciones)
+                        
+                        if fig1 is not None:
+                            st.plotly_chart(fig1, use_container_width=True)
+                        
+                        if fig2 is not None:
+                            st.plotly_chart(fig2, use_container_width=True)
+                    
+                    # Tabla detallada de predicciones
+                    st.subheader("📋 Datos Detallados de Predicciones")
+                    
+                    año_filtro = st.selectbox(
+                        "Filtrar por año:",
+                        options=['Todos'] + sorted(df_predicciones['año'].unique().tolist()),
+                        index=0
+                    )
+                    
+                    if año_filtro == 'Todos':
+                        datos_filtrados = df_predicciones
+                    else:
+                        datos_filtrados = df_predicciones[df_predicciones['año'] == int(año_filtro)]
+                    
+                    if not datos_filtrados.empty:
+                        st.dataframe(
+                            datos_filtrados.sort_values(['año', 'prediccion_patentes'], ascending=[True, False]).rename(
+                                columns={
+                                    'pais': 'País',
+                                    'año': 'Año',
+                                    'prediccion_patentes': 'Patentes Predichas',
+                                    'tendencia': 'Tendencia',
+                                    'confidence': 'Confianza'
+                                }
+                            ).style.format({
+                                'Patentes Predichas': '{:,.0f}'
+                            }),
+                            use_container_width=True
+                        )
+                    else:
+                        st.info(f"ℹ️ No hay predicciones para el año {año_filtro}")
     
     elif pagina_seleccionada == "🔍 Análisis por País":
         st.header("🔍 Análisis Detallado por País")
@@ -1018,7 +1102,7 @@ def main():
             )
         
         with col2:
-            if df_predicciones is not None:
+            if df_predicciones is not None and not df_predicciones.empty:
                 pred_2031_pais = df_predicciones[(df_predicciones['pais'] == pais_seleccionado) & 
                                                (df_predicciones['año'] == 2031)]
                 if not pred_2031_pais.empty:
@@ -1047,12 +1131,18 @@ def main():
                     )
                 
                 with col3:
-                    crecimiento = ((datos_pais['num_patentes'].iloc[-1] - datos_pais['num_patentes'].iloc[0]) / 
-                                 datos_pais['num_patentes'].iloc[0] * 100) if len(datos_pais) > 1 else 0
-                    st.metric(
-                        label="Crecimiento Histórico",
-                        value=f"{crecimiento:.1f}%"
-                    )
+                    if len(datos_pais) > 1:
+                        crecimiento = ((datos_pais['num_patentes'].iloc[-1] - datos_pais['num_patentes'].iloc[0]) / 
+                                     datos_pais['num_patentes'].iloc[0] * 100)
+                        st.metric(
+                            label="Crecimiento Histórico",
+                            value=f"{crecimiento:.1f}%"
+                        )
+                    else:
+                        st.metric(
+                            label="Crecimiento Histórico",
+                            value="N/A"
+                        )
                 
                 # Gráfico de evolución
                 fig = px.line(
@@ -1064,7 +1154,7 @@ def main():
                 )
                 
                 # Añadir predicciones si están disponibles
-                if df_predicciones is not None:
+                if df_predicciones is not None and not df_predicciones.empty:
                     pred_pais = df_predicciones[df_predicciones['pais'] == pais_seleccionado].sort_values('año')
                     
                     if not pred_pais.empty:
@@ -1083,6 +1173,8 @@ def main():
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning(f"⚠ No hay datos disponibles para {pais_seleccionado}")
 
 # ============================================================================
 # EJECUCIÓN DE LA APLICACIÓN
@@ -1095,6 +1187,3 @@ if __name__ == "__main__":
     
     # Ejecutar aplicación
     main()
-
-
-
