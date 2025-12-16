@@ -22,7 +22,7 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.model_selection import train_test_split, cross_val_score
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-from sklearn.linear_model import LinearRegression  # Añadido para tendencia
+from sklearn.linear_model import LinearRegression
 import base64
 import os
 
@@ -47,7 +47,7 @@ st.title("📊 Sistema Integrado de Análisis y Predicción de Patentes USPTO")
 st.markdown("---")
 
 # ============================================================================
-# 1. CONFIGURACIÓN Y CACHE DE DATOS - CORREGIDO
+# 1. FUNCIONES DE CARGA Y PREPARACIÓN DE DATOS
 # ============================================================================
 
 @st.cache_data(ttl=3600, show_spinner="Cargando datos desde GCS...")
@@ -59,31 +59,24 @@ def cargar_datos_desde_gcs():
         return generar_datos_ejemplo()
     
     try:
-        # Configurar cliente de GCS
         client = storage.Client(project='warm-physics-474702-q3')
         bucket = client.bucket('patentbucket-maam')
         
         todos_datos = []
         archivos_encontrados = 0
         
-        # Cargar los primeros 20 archivos para desarrollo más rápido
-        max_archivos = 66  # Reducido para desarrollo más rápido
-        
-        for i in range(min(66, max_archivos)):
+        for i in range(min(66, 20)):  # Reducido para desarrollo más rápido
             nombre_archivo = f"{i:012d}.csv"
             
             try:
                 blob = bucket.blob(nombre_archivo)
                 
                 if blob.exists():
-                    # Mostrar progreso
                     st.write(f"📂 Cargando archivo [{i:012d}/66]")
-                    
                     contenido = blob.download_as_bytes()
                     df_chunk = pd.read_csv(io.BytesIO(contenido))
                     todos_datos.append(df_chunk)
                     archivos_encontrados += 1
-                    
                 else:
                     st.write(f"⚠ {nombre_archivo} no encontrado")
                     
@@ -96,8 +89,6 @@ def cargar_datos_desde_gcs():
             return generar_datos_ejemplo()
         
         df_completo = pd.concat(todos_datos, ignore_index=True)
-        
-        # Mensaje de éxito
         st.success(f"✅ Datos cargados exitosamente: {len(df_completo):,} registros de {archivos_encontrados} archivos")
         
         return df_completo
@@ -114,20 +105,17 @@ def generar_datos_ejemplo():
     st.info("🔄 Generando datos de ejemplo realistas...")
     
     np.random.seed(42)
-    n = 30000  # 30,000 registros de ejemplo para Streamlit (más rápido)
+    n = 30000
     
     paises = ['US', 'CN', 'JP', 'DE', 'KR', 'GB', 'FR', 'IN', 'CA', 'BR', 
               'TW', 'NL', 'CH', 'SE', 'IT', 'AU', 'MX', 'ES', 'RU', 'SG']
     
-    # Distribución realista
     pesos = [0.35, 0.25, 0.08, 0.05, 0.04, 0.03, 0.03, 0.02, 0.02, 0.02] + [0.01] * 10
     pesos = pesos[:len(paises)]
     pesos = [p/sum(pesos) for p in pesos]
     
     secciones = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H']
     
-    # CORRECCIÓN: Generar años de manera más realista
-    # Crear distribución de años más realista (más patentes en años recientes)
     years = list(range(2006, 2022))
     year_weights = [0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 
                     0.10, 0.11, 0.12, 0.13, 0.14, 0.15, 0.16, 0.17]
@@ -143,7 +131,6 @@ def generar_datos_ejemplo():
     }
     
     df = pd.DataFrame(datos)
-    # Crear fecha de patente basada en el año
     df['patent_date'] = pd.to_datetime(df['year'].astype(str) + '-01-01') + pd.to_timedelta(np.random.randint(0, 365, n), unit='D')
     
     st.success(f"📋 Datos de ejemplo generados: {len(df):,} registros (2006-2021)")
@@ -154,22 +141,17 @@ def generar_datos_ejemplo():
 def limpiar_y_preparar_datos(df):
     """Limpia y prepara datos, eliminando duplicados"""
     
-    # Crear una copia para no modificar el original
     df_clean = df.copy()
     
-    # Si no hay columna 'id', crear una basada en las columnas principales
     if 'id' not in df_clean.columns:
-        # Crear un ID único basado en las columnas principales
         columns_for_id = ['assignee_country', 'section', 'patent_date', 'num_claims']
         columns_for_id = [col for col in columns_for_id if col in df_clean.columns]
         
         if columns_for_id:
-            # Crear una cadena combinada para identificar duplicados
             df_clean['temp_id'] = df_clean[columns_for_id].astype(str).agg('_'.join, axis=1)
         else:
             df_clean['temp_id'] = df_clean.index.astype(str)
     
-    # Eliminar duplicados basados en el ID temporal
     antes = len(df_clean)
     if 'temp_id' in df_clean.columns:
         df_clean = df_clean.drop_duplicates(subset=['temp_id'])
@@ -187,29 +169,21 @@ def verificar_y_corregir_datos_acumulados(df_agregado):
     
     df_corregido = df_agregado.copy()
     
-    # Verificar para cada país si los datos parecen acumulados
     for pais in df_corregido['assignee_country'].unique():
         datos_pais = df_corregido[df_corregido['assignee_country'] == pais].sort_values('year')
         
         if len(datos_pais) > 1:
-            # Calcular diferencias entre años consecutivos
             valores = datos_pais['num_patentes'].values
             diferencias = np.diff(valores)
             
-            # Si todas las diferencias son positivas y los valores solo aumentan,
-            # probablemente son datos acumulados
             if all(diff >= 0 for diff in diferencias) and valores[-1] > valores[0] * 3:
-                # Convertir de acumulado a anual
                 valores_anuales = np.zeros_like(valores, dtype=float)
                 valores_anuales[0] = valores[0]
                 
                 for i in range(1, len(valores)):
                     valores_anuales[i] = valores[i] - valores[i-1]
                 
-                # Asegurar que no haya valores negativos
                 valores_anuales = np.maximum(valores_anuales, 0)
-                
-                # Actualizar los valores en el DataFrame
                 indices_pais = datos_pais.index
                 df_corregido.loc[indices_pais, 'num_patentes'] = valores_anuales
                 
@@ -220,16 +194,14 @@ def verificar_y_corregir_datos_acumulados(df_agregado):
 
 @st.cache_data
 def preparar_datos_visualizacion(df):
-    """Prepara datos para visualizaciones - CORREGIDO para evitar datos acumulados"""
+    """Prepara datos para visualizaciones"""
     
-    # Asegurar columnas necesarias
     if 'year' not in df.columns and 'patent_date' in df.columns:
         df['patent_date'] = pd.to_datetime(df['patent_date'], errors='coerce')
         df['year'] = df['patent_date'].dt.year
     elif 'year' not in df.columns:
         df['year'] = np.random.randint(2006, 2022, len(df))
     
-    # Crear nombres de sección
     seccion_dict = {
         'A': 'Necesidades Humanas',
         'B': 'Operaciones y Transporte', 
@@ -244,14 +216,9 @@ def preparar_datos_visualizacion(df):
     if 'section' in df.columns:
         df['section_name'] = df['section'].map(seccion_dict)
     
-    # CORRECCIÓN: Crear datos agregados por país y año - CONTAR, NO SUMAR
-    # Usamos size() para contar el número de registros por grupo
     conteo_por_año = df.groupby(['assignee_country', 'year']).size().reset_index(name='num_patentes')
-    
-    # Obtener el promedio de num_claims por grupo
     promedio_claims = df.groupby(['assignee_country', 'year'])['num_claims'].mean().reset_index(name='avg_claims')
     
-    # Obtener número de secciones únicas por grupo
     if 'section' in df.columns:
         secciones_unicas = df.groupby(['assignee_country', 'year'])['section'].nunique().reset_index(name='unique_sections')
     else:
@@ -261,42 +228,26 @@ def preparar_datos_visualizacion(df):
             'unique_sections': 1
         })
     
-    # Combinar todos los datos
     df_agregado = conteo_por_año.merge(promedio_claims, on=['assignee_country', 'year'], how='left')
     df_agregado = df_agregado.merge(secciones_unicas, on=['assignee_country', 'year'], how='left')
     
-    # Llenar valores NaN
     df_agregado['avg_claims'] = df_agregado['avg_claims'].fillna(df_agregado['avg_claims'].mean())
     df_agregado['unique_sections'] = df_agregado['unique_sections'].fillna(1)
     
-    # Verificar si los datos parecen acumulados
     df_agregado = verificar_y_corregir_datos_acumulados(df_agregado)
-    
-    # Ordenar por país y año
     df_agregado = df_agregado.sort_values(['assignee_country', 'year'])
     
-    # Modo debug: mostrar ejemplos
     if st.session_state.get('debug_mode', False):
         st.write("🔍 Modo Debug - Datos Agregados:")
-        
-        # Mostrar algunos ejemplos
         for pais in df_agregado['assignee_country'].unique()[:2]:
             datos_pais = df_agregado[df_agregado['assignee_country'] == pais].sort_values('year')
             st.write(f"📊 Datos para {pais}:")
             st.dataframe(datos_pais[['year', 'num_patentes', 'avg_claims']].head())
-            
-            # Verificar si parece acumulado
-            valores = datos_pais['num_patentes'].values
-            if len(valores) > 1:
-                creciente = all(valores[i] <= valores[i+1] for i in range(len(valores)-1))
-                st.write(f"  - ¿Valores crecientes? {creciente}")
-                st.write(f"  - Primer valor: {valores[0]}, Último valor: {valores[-1]}")
-                st.write(f"  - Diferencia: {valores[-1] - valores[0]}")
     
     return df, df_agregado
 
 # ============================================================================
-# 2. FUNCIONES DE VISUALIZACIÓN CON PLOTLY - CORREGIDAS
+# 2. FUNCIONES DE VISUALIZACIÓN
 # ============================================================================
 
 def crear_mapa_mundial_interactivo(df_agregado, year=None, section=None, df_original=None):
@@ -304,21 +255,17 @@ def crear_mapa_mundial_interactivo(df_agregado, year=None, section=None, df_orig
     
     datos = df_agregado.copy()
     
-    # Aplicar filtros
     if year:
         datos = datos[datos['year'] == year]
     
-    # Si se filtra por sección, usar datos originales
     if section and df_original is not None:
         datos_seccion = df_original[df_original['section'] == section]
         datos = datos_seccion.groupby(['assignee_country', 'year']).size().reset_index(name='num_patentes')
         if year:
             datos = datos[datos['year'] == year]
     
-    # Contar por país
     conteo = datos.groupby('assignee_country')['num_patentes'].sum().reset_index()
     
-    # Mapeo de códigos ISO
     codigos_iso = {
         'US': 'USA', 'CN': 'CHN', 'JP': 'JPN', 'DE': 'DEU', 'KR': 'KOR',
         'GB': 'GBR', 'FR': 'FRA', 'IN': 'IND', 'CA': 'CAN', 'BR': 'BRA',
@@ -328,7 +275,6 @@ def crear_mapa_mundial_interactivo(df_agregado, year=None, section=None, df_orig
     
     conteo['iso_a3'] = conteo['assignee_country'].map(codigos_iso)
     
-    # Título
     titulo = "🌍 Distribución Global de Patentes USPTO"
     if year:
         titulo += f" - Año {year}"
@@ -338,7 +284,6 @@ def crear_mapa_mundial_interactivo(df_agregado, year=None, section=None, df_orig
                   'G': 'Física', 'H': 'Electricidad'}
         titulo += f" - Sección {section} ({nombres.get(section, section)})"
     
-    # Crear mapa con Plotly
     fig = px.choropleth(
         conteo,
         locations="iso_a3",
@@ -362,14 +307,13 @@ def crear_mapa_mundial_interactivo(df_agregado, year=None, section=None, df_orig
     
     return fig
 
-def crear_grafico_tendencia_corregido(df_agregado, pais=None, seccion=None, df_original=None):
-    """Crea gráfico de tendencia con datos corregidos (no acumulados)"""
+def crear_grafico_tendencia(df_agregado, pais=None, seccion=None, df_original=None):
+    """Crea gráfico de tendencia con datos corregidos"""
     
     if pais:
         datos = df_agregado[df_agregado['assignee_country'] == pais].sort_values('year')
         titulo = f"📈 Evolución Anual de Patentes - {pais}"
     elif seccion and df_original is not None:
-        # Filtrar por sección
         datos_seccion = df_original[df_original['section'] == seccion]
         datos = datos_seccion.groupby(['year']).size().reset_index(name='num_patentes')
         nombres = {'A': 'Necesidades', 'B': 'Operaciones', 'C': 'Química',
@@ -377,11 +321,9 @@ def crear_grafico_tendencia_corregido(df_agregado, pais=None, seccion=None, df_o
                   'G': 'Física', 'H': 'Electricidad'}
         titulo = f"📈 Evolución Anual - Sección {seccion} ({nombres.get(seccion, seccion)})"
     else:
-        # Sumar por año para todos los países (no acumulado, datos anuales reales)
         datos = df_agregado.groupby('year')['num_patentes'].sum().reset_index()
         titulo = "📈 Evolución Anual Total de Patentes"
     
-    # Asegurar que los datos están ordenados por año
     datos = datos.sort_values('year')
     
     fig = px.line(
@@ -392,7 +334,6 @@ def crear_grafico_tendencia_corregido(df_agregado, pais=None, seccion=None, df_o
         markers=True
     )
     
-    # Añadir barras para mayor claridad
     fig.add_trace(go.Bar(
         x=datos['year'],
         y=datos['num_patentes'],
@@ -410,30 +351,24 @@ def crear_grafico_tendencia_corregido(df_agregado, pais=None, seccion=None, df_o
     
     return fig
 
-def grafico_tendencia_anual_interactivo(df_agregado, pais=None, seccion=None, df_original=None):
-    """Gráfico de evolución anual de patentes con Plotly"""
-    
-    # Usar la función corregida
-    return crear_grafico_tendencia_corregido(df_agregado, pais, seccion, df_original)
-
 # ============================================================================
-# 3. ENSEMBLE LEARNING PARA STREAMLIT - CORREGIDO Y MEJORADO
+# 3. ENSEMBLE LEARNING PARA STREAMLIT
 # ============================================================================
 
 class EnsemblePredictorStreamlit:
-    """Clase para predicción usando Ensemble Learning optimizada para Streamlit"""
+    """Clase para predicción usando Ensemble Learning"""
     
     def __init__(self):
         self.models = {
             'random_forest': RandomForestRegressor(
-                n_estimators=50,  # Reducido para Streamlit
+                n_estimators=50,
                 max_depth=8,
                 min_samples_split=5,
                 random_state=42,
                 n_jobs=-1
             ),
             'gradient_boosting': GradientBoostingRegressor(
-                n_estimators=40,  # Reducido para Streamlit
+                n_estimators=40,
                 learning_rate=0.1,
                 max_depth=4,
                 random_state=42
@@ -449,28 +384,19 @@ class EnsemblePredictorStreamlit:
         """Prepara datos para entrenamiento de modelos"""
         
         datos = df_agregado.copy()
-        
-        # Añadir características temporales
         datos['year_squared'] = datos['year'] ** 2
         datos['year_cubed'] = datos['year'] ** 3
-        
-        # Codificar países
         datos['country_encoded'] = self.encoder.fit_transform(datos['assignee_country'])
         
-        # Añadir características por país
         paises = datos['assignee_country'].unique()
         
         for pais in paises:
             datos_pais = datos[datos['assignee_country'] == pais].sort_values('year')
             
             if len(datos_pais) >= 3:
-                # Media móvil de 3 años
                 datos.loc[datos_pais.index, 'ma_3y'] = datos_pais['num_patentes'].rolling(window=3, min_periods=1).mean()
-                
-                # Tasa de crecimiento
                 datos.loc[datos_pais.index, 'growth_rate'] = datos_pais['num_patentes'].pct_change().fillna(0)
         
-        # Rellenar valores faltantes
         datos['ma_3y'] = datos['ma_3y'].fillna(datos['num_patentes'])
         datos['growth_rate'] = datos['growth_rate'].fillna(0)
         
@@ -488,8 +414,6 @@ class EnsemblePredictorStreamlit:
             if len(datos_pais) >= horizonte + 3:
                 for i in range(len(datos_pais) - horizonte):
                     fila_actual = datos_pais.iloc[i]
-                    
-                    # Características históricas
                     historico = datos_pais.iloc[max(0, i-3):i+1]
                     
                     muestra = {
@@ -504,7 +428,6 @@ class EnsemblePredictorStreamlit:
                         'growth_3y': historico['growth_rate'].mean() if 'growth_rate' in historico.columns and len(historico) > 0 else 0,
                     }
                     
-                    # CORRECCIÓN: Asegurar que existe el target
                     if i + horizonte < len(datos_pais):
                         muestra[f'target_{horizonte}y'] = datos_pais.iloc[i + horizonte]['num_patentes']
                     else:
@@ -515,11 +438,9 @@ class EnsemblePredictorStreamlit:
         df_entrenamiento = pd.DataFrame(muestras)
         df_entrenamiento = df_entrenamiento.dropna()
         
-        # CORRECCIÓN: Verificar que la columna target existe
         target_col = f'target_{horizonte}y'
         if target_col not in df_entrenamiento.columns:
             st.warning(f"⚠ No se pudo crear la columna {target_col}")
-            # Crear una columna dummy usando num_patentes_actual
             df_entrenamiento[target_col] = df_entrenamiento['num_patentes_actual']
         
         return df_entrenamiento
@@ -527,15 +448,12 @@ class EnsemblePredictorStreamlit:
     def entrenar_modelos(self, df_entrenamiento, horizonte=6):
         """Entrena los modelos ensemble"""
         
-        # CORRECCIÓN: Verificar que la columna target existe primero
         target_col = f'target_{horizonte}y'
         
         if target_col not in df_entrenamiento.columns:
             st.error(f"❌ Error: La columna '{target_col}' no existe en los datos de entrenamiento")
-            st.write("📋 Columnas disponibles:", df_entrenamiento.columns.tolist())
             return None, None, None
         
-        # Preparar características y target
         feature_cols = [
             'country_encoded', 'year_actual',
             'num_patentes_actual', 'avg_claims', 'sections_unique',
@@ -546,35 +464,27 @@ class EnsemblePredictorStreamlit:
         self.feature_columns = available_cols
         
         X = df_entrenamiento[available_cols]
-        y = df_entrenamiento[target_col]  # Usar target_col
+        y = df_entrenamiento[target_col]
         
-        # Verificar que tenemos datos suficientes
         if len(X) < 10:
             st.error(f"❌ Datos insuficientes para entrenamiento: solo {len(X)} muestras")
             return None, None, None
         
-        # Dividir datos
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42
         )
         
-        # Escalar características
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
         
-        # Entrenar y evaluar cada modelo
         resultados = {}
         
         for nombre, modelo in self.models.items():
             try:
-                # Validación cruzada simplificada para Streamlit
                 cv_scores = cross_val_score(modelo, X_train_scaled, y_train, 
                                            cv=3, scoring='r2', n_jobs=-1)
                 
-                # Entrenar modelo final
                 modelo.fit(X_train_scaled, y_train)
-                
-                # Evaluar en test
                 y_pred = modelo.predict(X_test_scaled)
                 
                 mae = mean_absolute_error(y_test, y_pred)
@@ -601,7 +511,7 @@ class EnsemblePredictorStreamlit:
         return X_test, y_test, resultados
     
     def predecir_futuro(self, df_agregado, años_futuros=6, países_interes=None):
-        """Genera predicciones para años futuros - CORREGIDO Y MEJORADO"""
+        """Genera predicciones para años futuros"""
         
         if países_interes is None:
             top_paises = df_agregado.groupby('assignee_country')['num_patentes'].sum().nlargest(10).index
@@ -616,11 +526,9 @@ class EnsemblePredictorStreamlit:
                 st.warning(f"⚠ {pais} no tiene suficientes datos históricos")
                 continue
             
-            # Último año disponible
             ultimo_año = datos_pais['year'].max()
             ultimos_datos = datos_pais[datos_pais['year'] == ultimo_año].iloc[0]
             
-            # Codificar país
             try:
                 country_encoded = self.encoder.transform([pais])[0]
             except:
@@ -629,18 +537,15 @@ class EnsemblePredictorStreamlit:
             
             # Calcular tendencia histórica
             if len(datos_pais) >= 5:
-                # Usar regresión lineal simple para calcular tendencia
                 years_hist = datos_pais['year'].values.reshape(-1, 1)
                 patentes_hist = datos_pais['num_patentes'].values
                 
-                # Calcular pendiente de tendencia
                 if len(set(patentes_hist)) > 1:
                     lr = LinearRegression()
                     lr.fit(years_hist, patentes_hist)
                     pendiente_tendencia = lr.coef_[0]
                     intercepto = lr.intercept_
                     
-                    # Predecir valores base usando tendencia lineal
                     def predecir_tendencia_lineal(año):
                         return intercepto + pendiente_tendencia * (año - years_hist[0][0])
                 else:
@@ -656,17 +561,14 @@ class EnsemblePredictorStreamlit:
                 def predecir_tendencia_lineal(año):
                     return intercepto
             
-            # Obtener estadísticas históricas
             media_historica = datos_pais['num_patentes'].mean()
             max_historico = datos_pais['num_patentes'].max()
             min_historico = datos_pais['num_patentes'].min()
             std_historica = datos_pais['num_patentes'].std()
             
-            # Generar predicciones para cada año futuro
             for año_offset in range(1, años_futuros + 1):
                 año_futuro = ultimo_año + año_offset
                 
-                # Preparar características para predicción
                 features = {
                     'country_encoded': country_encoded,
                     'year_actual': año_futuro,
@@ -678,55 +580,41 @@ class EnsemblePredictorStreamlit:
                     'growth_3y': datos_pais['growth_rate'].tail(3).mean() if 'growth_rate' in datos_pais.columns else 0.03
                 }
                 
-                # Crear DataFrame de características
                 df_features = pd.DataFrame([features])
                 
-                # Asegurar todas las columnas
                 if self.feature_columns:
                     for col in self.feature_columns:
                         if col not in df_features.columns:
                             df_features[col] = 0
                 
-                # Verificar que tenemos las columnas necesarias
                 if not self.feature_columns:
                     st.error("❌ No se han definido las columnas de características")
                     continue
                 
                 try:
-                    # Escalar y predecir
                     X_pred = df_features[self.feature_columns]
                     X_pred_scaled = self.scaler.transform(X_pred)
                     
-                    # Predicción ensemble ponderada
                     pred_rf = self.models['random_forest'].predict(X_pred_scaled)[0]
                     pred_gb = self.models['gradient_boosting'].predict(X_pred_scaled)[0]
                     pred_ensemble = pred_rf * self.ensemble_weights['random_forest'] + \
                                    pred_gb * self.ensemble_weights['gradient_boosting']
                     
-                    # Ajustar predicción basada en tendencia histórica
-                    # Combinar predicción del modelo con tendencia lineal
                     pred_tendencia_lineal = predecir_tendencia_lineal(año_futuro)
-                    
-                    # Ponderación: 70% modelo, 30% tendencia lineal
                     pred_ajustada = pred_ensemble * 0.7 + pred_tendencia_lineal * 0.3
                     
-                    # Añadir ruido aleatorio basado en la variabilidad histórica
                     if std_historica > 0:
                         ruido = np.random.normal(0, std_historica * 0.1)
                         pred_ajustada += ruido
                     
-                    # Asegurar que la predicción esté dentro de rangos razonables
-                    # Basado en datos históricos
                     rango_min = max(10, min_historico * 0.5)
                     rango_max = max_historico * 1.5 if max_historico > 0 else media_historica * 2
                     
                     pred_final = np.clip(pred_ajustada, rango_min, rango_max)
                     
-                    # Determinar tendencia
                     if año_offset == 1:
                         tendencia = 'crecimiento' if pred_final > ultimos_datos['num_patentes'] else 'decrecimiento'
                     else:
-                        # Buscar predicción del año anterior
                         pred_anterior = None
                         for p in reversed(predicciones):
                             if p['pais'] == pais and p['año'] == año_futuro - 1:
@@ -738,14 +626,12 @@ class EnsemblePredictorStreamlit:
                         
                         tendencia = 'crecimiento' if pred_final > pred_anterior else 'decrecimiento'
                     
-                    # Calcular confianza basada en datos históricos y horizonte
                     if media_historica > 0:
                         varianza_historica = std_historica / media_historica
                         confianza_base = max(0.1, 1 - min(varianza_historica, 1))
                     else:
                         confianza_base = 0.5
                     
-                    # La confianza disminuye con el horizonte temporal
                     confianza = confianza_base * (1 - (año_offset / (años_futuros * 1.5)))
                     
                     if confianza > 0.7:
@@ -770,8 +656,6 @@ class EnsemblePredictorStreamlit:
                     
                 except Exception as e:
                     st.warning(f"⚠ Error prediciendo para {pais} en {año_futuro}: {str(e)}")
-                    
-                    # Si hay error, usar proyección simple basada en tendencia
                     pred_tendencia_lineal = predecir_tendencia_lineal(año_futuro)
                     
                     if año_offset == 1:
@@ -782,7 +666,6 @@ class EnsemblePredictorStreamlit:
                                            ultimos_datos['num_patentes'])
                         pred_simple = pred_anterior * (1 + (pendiente_tendencia / 100))
                     
-                    # Promediar entre los dos métodos
                     pred_final = (pred_tendencia_lineal + pred_simple) / 2
                     
                     predicciones.append({
@@ -804,34 +687,34 @@ class EnsemblePredictorStreamlit:
         
         df_predicciones = pd.DataFrame(predicciones)
         
-        # Mostrar resumen de predicciones
         if st.session_state.get('debug_mode', False):
             st.info(f"📊 Generadas {len(df_predicciones)} predicciones para {len(países_interes)} países")
         
         return df_predicciones
 
-def visualizar_predicciones_interactivas(df_predicciones):
-    """Visualizaciones interactivas para predicciones - CORREGIDO"""
+def crear_visualizacion_predicciones(df_predicciones):
+    """Crea visualizaciones para predicciones"""
     
     if df_predicciones.empty:
         st.warning("⚠ No hay predicciones para visualizar")
         return None, None
     
-    # 1. Gráfico de barras para 2031
-    pred_2031 = df_predicciones[df_predicciones['año'] == 2031].sort_values('prediccion_patentes', ascending=False).head(10)
+    # Gráfico de barras para el último año
+    ultimo_año = df_predicciones['año'].max()
+    pred_ultimo_año = df_predicciones[df_predicciones['año'] == ultimo_año].sort_values('prediccion_patentes', ascending=False).head(10)
     
-    if pred_2031.empty:
-        st.info("ℹ️ No hay predicciones para 2031")
+    if pred_ultimo_año.empty:
+        st.info(f"ℹ️ No hay predicciones para {ultimo_año}")
         return None, None
     
     fig1 = px.bar(
-        pred_2031,
+        pred_ultimo_año,
         x='prediccion_patentes',
         y='pais',
         orientation='h',
         color='tendencia',
         color_discrete_map={'crecimiento': 'green', 'decrecimiento': 'red'},
-        title='Top 10 Países - Predicción 2031',
+        title=f'Top 10 Países - Predicción {ultimo_año}',
         labels={'prediccion_patentes': 'Patentes Predichas', 'pais': 'País'}
     )
     
@@ -841,19 +724,14 @@ def visualizar_predicciones_interactivas(df_predicciones):
         yaxis_title="País"
     )
     
-    # 2. Evolución temporal para top 3 países - CORREGIDO
-    top_3_paises = pred_2031['pais'].head(3).tolist()
-    
+    # Evolución temporal para top 3 países
+    top_3_paises = pred_ultimo_año['pais'].head(3).tolist()
     fig2 = go.Figure()
     
     for pais in top_3_paises:
         datos_pais = df_predicciones[df_predicciones['pais'] == pais].sort_values('año')
         
         if not datos_pais.empty:
-            # Verificar que tenemos datos para todos los años
-            if len(datos_pais) < 10:
-                st.warning(f"⚠ {pais} no tiene predicciones completas para todos los años")
-            
             fig2.add_trace(go.Scatter(
                 x=datos_pais['año'],
                 y=datos_pais['prediccion_patentes'],
@@ -863,13 +741,12 @@ def visualizar_predicciones_interactivas(df_predicciones):
                 marker=dict(size=8)
             ))
     
-    # Configurar eje Y con rango adecuado
     if not df_predicciones.empty:
         y_min = max(0, df_predicciones['prediccion_patentes'].min() * 0.8)
         y_max = df_predicciones['prediccion_patentes'].max() * 1.2
     
     fig2.update_layout(
-        title='Evolución de Predicciones 2022-2031 - Top 3 Países',
+        title='Evolución de Predicciones - Top 3 Países',
         xaxis_title='Año',
         yaxis_title='Patentes Predichas',
         height=500,
@@ -888,130 +765,8 @@ def visualizar_predicciones_interactivas(df_predicciones):
     
     return fig1, fig2
 
-def crear_visualizacion_detallada_predicciones(df_predicciones):
-    """Crea visualización detallada de predicciones con múltiples vistas"""
-    
-    if df_predicciones.empty:
-        return None
-    
-    # Crear subplots
-    fig = make_subplots(
-        rows=2, cols=2,
-        subplot_titles=('Evolución por País', 'Predicciones 2031', 
-                       'Crecimiento Anual', 'Distribución por Confianza'),
-        vertical_spacing=0.15,
-        horizontal_spacing=0.15
-    )
-    
-    # 1. Evolución por país (top 5)
-    top_paises = df_predicciones[df_predicciones['año'] == 2031].nlargest(5, 'prediccion_patentes')['pais'].tolist()
-    
-    for i, pais in enumerate(top_paises):
-        datos_pais = df_predicciones[df_predicciones['pais'] == pais].sort_values('año')
-        
-        fig.add_trace(
-            go.Scatter(
-                x=datos_pais['año'],
-                y=datos_pais['prediccion_patentes'],
-                mode='lines+markers',
-                name=pais,
-                line=dict(width=2),
-                marker=dict(size=6)
-            ),
-            row=1, col=1
-        )
-    
-    # 2. Predicciones 2031 (barras)
-    pred_2031 = df_predicciones[df_predicciones['año'] == 2031].sort_values('prediccion_patentes', ascending=False).head(10)
-    
-    fig.add_trace(
-        go.Bar(
-            x=pred_2031['prediccion_patentes'],
-            y=pred_2031['pais'],
-            orientation='h',
-            marker_color='lightblue',
-            name='2031'
-        ),
-        row=1, col=2
-    )
-    
-    # 3. Crecimiento anual promedio
-    crecimiento_promedio = []
-    años = sorted(df_predicciones['año'].unique())
-    
-    for año in años[1:]:  # Excluir el primer año
-        año_anterior = año - 1
-        datos_año = df_predicciones[df_predicciones['año'] == año]
-        datos_año_anterior = df_predicciones[df_predicciones['año'] == año_anterior]
-        
-        if not datos_año.empty and not datos_año_anterior.empty:
-            # Calcular crecimiento promedio
-            crecimiento = []
-            for pais in datos_año['pais'].unique():
-                pred_actual = datos_año[datos_año['pais'] == pais]['prediccion_patentes'].iloc[0] if not datos_año[datos_año['pais'] == pais].empty else None
-                pred_anterior = datos_año_anterior[datos_año_anterior['pais'] == pais]['prediccion_patentes'].iloc[0] if not datos_año_anterior[datos_año_anterior['pais'] == pais].empty else None
-                
-                if pred_actual and pred_anterior and pred_anterior > 0:
-                    crecimiento.append((pred_actual - pred_anterior) / pred_anterior * 100)
-            
-            if crecimiento:
-                crecimiento_promedio.append({
-                    'año': año,
-                    'crecimiento_promedio': np.mean(crecimiento)
-                })
-    
-    if crecimiento_promedio:
-        df_crecimiento = pd.DataFrame(crecimiento_promedio)
-        fig.add_trace(
-            go.Bar(
-                x=df_crecimiento['año'],
-                y=df_crecimiento['crecimiento_promedio'],
-                name='Crecimiento %',
-                marker_color='orange'
-            ),
-            row=2, col=1
-        )
-    
-    # 4. Distribución por confianza
-    confianza_dist = df_predicciones['confianza'].value_counts()
-    
-    fig.add_trace(
-        go.Pie(
-            labels=confianza_dist.index,
-            values=confianza_dist.values,
-            name='Confianza',
-            hole=0.4
-        ),
-        row=2, col=2
-    )
-    
-    # Actualizar layout
-    fig.update_layout(
-        title_text='Análisis Detallado de Predicciones',
-        height=800,
-        showlegend=True,
-        legend=dict(
-            yanchor="top",
-            y=0.99,
-            xanchor="left",
-            x=1.05
-        )
-    )
-    
-    # Actualizar ejes
-    fig.update_xaxes(title_text="Año", row=1, col=1)
-    fig.update_yaxes(title_text="Patentes Predichas", row=1, col=1)
-    
-    fig.update_xaxes(title_text="Patentes Predichas", row=1, col=2)
-    fig.update_yaxes(title_text="País", row=1, col=2)
-    
-    fig.update_xaxes(title_text="Año", row=2, col=1)
-    fig.update_yaxes(title_text="Crecimiento %", row=2, col=1)
-    
-    return fig
-
 # ============================================================================
-# 4. APLICACIÓN PRINCIPAL STREAMLIT - CORREGIDA
+# 4. APLICACIÓN PRINCIPAL STREAMLIT
 # ============================================================================
 
 def main():
@@ -1024,20 +779,17 @@ def main():
         
         st.subheader("⚙️ Configuración")
         
-        # Opción para modo debug
         if st.checkbox("🔧 Modo Debug", value=False, key="debug_checkbox"):
             st.session_state['debug_mode'] = True
         else:
             st.session_state['debug_mode'] = False
         
-        # Selector de modo de datos
         modo_datos = st.radio(
             "Fuente de datos:",
             ["Datos de Ejemplo", "Google Cloud Storage"],
-            index=0  # Por defecto datos de ejemplo
+            index=0
         )
         
-        # Botón para cargar datos
         if st.button("🔄 Cargar Datos", type="primary", use_container_width=True):
             if modo_datos == "Google Cloud Storage":
                 if not GCS_AVAILABLE:
@@ -1045,56 +797,27 @@ def main():
                 else:
                     with st.spinner("Cargando datos desde GCS..."):
                         df_original = cargar_datos_desde_gcs()
-                        # CORRECCIÓN: Limpiar datos antes de prepararlos
                         df_original = limpiar_y_preparar_datos(df_original)
                         df_original, df_agregado = preparar_datos_visualizacion(df_original)
                         
-                        # Guardar en session state
                         st.session_state['df_original'] = df_original
                         st.session_state['df_agregado'] = df_agregado
                         
                         st.success("✅ Datos cargados exitosamente!")
-                        
-                        # Mostrar estadísticas si está en modo debug
-                        if st.session_state.get('debug_mode', False):
-                            st.write("📊 Estadísticas de datos cargados:")
-                            st.write(f"- Total registros: {len(df_original):,}")
-                            st.write(f"- Años cubiertos: {df_original['year'].min()} - {df_original['year'].max()}")
-                            st.write(f"- Países únicos: {df_original['assignee_country'].nunique()}")
-                            
-                            # Mostrar distribución por año
-                            st.write("📈 Distribución por año:")
-                            year_dist = df_original['year'].value_counts().sort_index()
-                            st.bar_chart(year_dist)
             else:
                 with st.spinner("Generando datos de ejemplo..."):
                     df_original = generar_datos_ejemplo()
-                    # CORRECCIÓN: Limpiar datos antes de prepararlos
                     df_original = limpiar_y_preparar_datos(df_original)
                     df_original, df_agregado = preparar_datos_visualizacion(df_original)
                     
-                    # Guardar en session state
                     st.session_state['df_original'] = df_original
                     st.session_state['df_agregado'] = df_agregado
                     
                     st.success("✅ Datos de ejemplo generados exitosamente!")
-                    
-                    # Mostrar estadísticas si está en modo debug
-                    if st.session_state.get('debug_mode', False):
-                        st.write("📊 Estadísticas de datos:")
-                        st.write(f"- Total registros: {len(df_original):,}")
-                        st.write(f"- Años cubiertos: {df_original['year'].min()} - {df_original['year'].max()}")
-                        st.write(f"- Países únicos: {df_original['assignee_country'].nunique()}")
-                        
-                        # Mostrar distribución por año
-                        st.write("📈 Distribución por año:")
-                        year_dist = df_original['year'].value_counts().sort_index()
-                        st.bar_chart(year_dist)
         
         st.markdown("---")
         st.subheader("📊 Navegación")
         
-        # Menú de navegación
         pagina_seleccionada = st.radio(
             "Selecciona una sección:",
             [
@@ -1142,7 +865,6 @@ def main():
         
         """)
         
-        # Mostrar estadísticas rápidas si hay datos cargados
         if 'df_agregado' in st.session_state:
             st.subheader("📊 Vista Rápida de Datos")
             
@@ -1163,7 +885,6 @@ def main():
                 )
             
             with col3:
-                # CORRECCIÓN: Sumar num_patentes (que ahora son datos anuales, no acumulados)
                 total_patentes = df_agregado['num_patentes'].sum()
                 st.metric(
                     label="Patentes Totales",
@@ -1180,11 +901,6 @@ def main():
         df_agregado = st.session_state['df_agregado']
         df_original = st.session_state['df_original']
         
-        # Mostrar advertencia si está en modo debug
-        if st.session_state.get('debug_mode', False):
-            st.info("🔍 Modo Debug activado: Se mostrarán detalles técnicos")
-        
-        # Pestañas para diferentes tipos de análisis
         tab1, tab2, tab3 = st.tabs([
             "🌍 Mapa Mundial", 
             "📈 Tendencias", 
@@ -1214,7 +930,6 @@ def main():
                 else:
                     section_filtro = 'Todas'
             
-            # Generar mapa
             year = None if year_filtro == 'Todos' else int(year_filtro)
             section = None if section_filtro == 'Todas' else section_filtro
             
@@ -1244,39 +959,14 @@ def main():
                 else:
                     seccion_filtro = 'Todas'
             
-            # Generar gráfico CORREGIDO
             if pais_filtro == 'Todos' and seccion_filtro == 'Todas':
-                # Mostrar total por año
-                fig_tendencia = crear_grafico_tendencia_corregido(df_agregado)
+                fig_tendencia = crear_grafico_tendencia(df_agregado)
             elif pais_filtro != 'Todos':
-                # Mostrar para país específico
-                fig_tendencia = crear_grafico_tendencia_corregido(df_agregado, pais_filtro)
+                fig_tendencia = crear_grafico_tendencia(df_agregado, pais_filtro)
             else:
-                # Mostrar para sección específica
-                fig_tendencia = crear_grafico_tendencia_corregido(df_agregado, seccion=seccion_filtro, df_original=df_original)
+                fig_tendencia = crear_grafico_tendencia(df_agregado, seccion=seccion_filtro, df_original=df_original)
             
             st.plotly_chart(fig_tendencia, use_container_width=True)
-            
-            # Mostrar tabla de datos para verificación
-            if st.checkbox("📋 Mostrar datos de tendencia", value=False, key="mostrar_datos_tendencia"):
-                if pais_filtro == 'Todos' and seccion_filtro == 'Todas':
-                    datos_tabla = df_agregado.groupby('year').agg({
-                        'num_patentes': 'sum',
-                        'avg_claims': 'mean'
-                    }).reset_index()
-                elif pais_filtro != 'Todos':
-                    datos_tabla = df_agregado[df_agregado['assignee_country'] == pais_filtro]
-                else:
-                    datos_seccion = df_original[df_original['section'] == seccion_filtro]
-                    datos_tabla = datos_seccion.groupby('year').size().reset_index(name='num_patentes')
-                
-                st.dataframe(
-                    datos_tabla.style.format({
-                        'num_patentes': '{:,.0f}',
-                        'avg_claims': '{:.1f}'
-                    }),
-                    use_container_width=True
-                )
         
         with tab3:
             st.subheader("Estadísticas Detalladas")
@@ -1295,14 +985,12 @@ def main():
                 )
             
             with col2:
-                # CORRECCIÓN: Sumar datos anuales (no acumulados)
                 total_patentes = df_agregado['num_patentes'].sum()
                 st.metric(
                     label="Total Patentes",
                     value=f"{total_patentes:,.0f}"
                 )
                 
-                # CORRECCIÓN: Promedio por año (datos anuales reales)
                 promedio_anual = df_agregado.groupby('year')['num_patentes'].sum().mean()
                 st.metric(
                     label="Patentes/Año Promedio",
@@ -1316,7 +1004,6 @@ def main():
                         value=df_original['section'].nunique()
                     )
                 
-                # País líder
                 pais_lider = df_agregado.groupby('assignee_country')['num_patentes'].sum().idxmax()
                 patentes_lider = int(df_agregado.groupby('assignee_country')['num_patentes'].sum().max())
                 st.metric(
@@ -1324,20 +1011,16 @@ def main():
                     value=f"{pais_lider} ({patentes_lider:,})"
                 )
             
-            # Top 10 países
             st.subheader("🏆 Top 10 Países por Patentes Totales")
             
-            # CORRECCIÓN: Sumar datos anuales (no acumulados)
             top_paises = df_agregado.groupby('assignee_country')['num_patentes'].sum().nlargest(10)
             
-            # Crear DataFrame para visualización
             top_df = pd.DataFrame({
                 'País': top_paises.index,
                 'Patentes': top_paises.values,
                 'Porcentaje': (top_paises.values / top_paises.values.sum() * 100)
             })
             
-            # Mostrar tabla
             st.dataframe(
                 top_df.style.format({
                     'Patentes': '{:,.0f}',
@@ -1363,7 +1046,7 @@ def main():
         with tab1:
             st.subheader("Entrenamiento de Modelos Ensemble")
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2 = st.columns(2)
             
             with col1:
                 horizonte_prediccion = st.slider(
@@ -1381,64 +1064,39 @@ def main():
                     value=10
                 )
             
-            with col3:
-                años_futuros = st.slider(
-                    "Años futuros a predecir:",
-                    min_value=5,
-                    max_value=15,
-                    value=10
-                )
-            
-            # CORRECCIÓN: Mejor manejo del botón de entrenamiento
             if st.button("🚀 Entrenar Modelos y Generar Predicciones", type="primary", use_container_width=True):
                 
                 with st.spinner("Entrenando modelos..."):
                     try:
-                        # Inicializar predictor
                         ensemble_model = EnsemblePredictorStreamlit()
-                        
-                        # Preparar datos
                         datos_preparados = ensemble_model.preparar_datos_para_prediccion(df_agregado)
-                        
-                        # Crear dataset de entrenamiento con el horizonte correcto
                         df_entrenamiento = ensemble_model.crear_dataset_entrenamiento(
                             datos_preparados, 
                             horizonte=horizonte_prediccion
                         )
                         
-                        # Verificar que df_entrenamiento no está vacío
                         if df_entrenamiento.empty:
                             st.error("❌ No hay suficientes datos para entrenar el modelo con este horizonte.")
-                            st.info("💡 Intenta con un horizonte de predicción más corto o usa más países.")
                         else:
                             st.info(f"📊 Dataset de entrenamiento creado: {len(df_entrenamiento)} muestras")
                             
-                            # Mostrar preview de datos si está en modo debug
-                            if st.session_state.get('debug_mode', False):
-                                st.write("📋 Preview datos entrenamiento:")
-                                st.dataframe(df_entrenamiento.head())
-                            
-                            # Entrenar modelos usando el mismo horizonte
                             X_test, y_test, resultados = ensemble_model.entrenar_modelos(
                                 df_entrenamiento, 
                                 horizonte=horizonte_prediccion
                             )
                             
-                            if resultados is not None:  # Solo continuar si el entrenamiento fue exitoso
-                                # Generar predicciones futuras
+                            if resultados is not None:
                                 top_paises = df_agregado.groupby('assignee_country')['num_patentes'].sum().nlargest(num_paises_prediccion).index
                                 df_predicciones = ensemble_model.predecir_futuro(
-                                    df_agregado, años_futuros=años_futuros, países_interes=top_paises.tolist()
+                                    df_agregado, años_futuros=10, países_interes=top_paises.tolist()
                                 )
                                 
-                                # Guardar en session state
                                 st.session_state['ensemble_model'] = ensemble_model
                                 st.session_state['df_predicciones'] = df_predicciones
                                 st.session_state['resultados_entrenamiento'] = resultados
                                 
                                 st.success("✅ ¡Modelos entrenados y predicciones generadas exitosamente!")
                                 
-                                # Mostrar métricas rápidas
                                 if ensemble_model.metrics:
                                     st.subheader("📊 Métricas del Modelo")
                                     
@@ -1456,7 +1114,6 @@ def main():
                             
                     except Exception as e:
                         st.error(f"❌ Error durante el entrenamiento: {str(e)}")
-                        st.info("💡 Intenta con diferentes parámetros o verifica tus datos.")
         
         with tab2:
             st.subheader("Visualización de Predicciones")
@@ -1469,15 +1126,14 @@ def main():
                 if df_predicciones.empty:
                     st.warning("⚠ No hay predicciones disponibles. Intenta entrenar los modelos nuevamente.")
                 else:
-                    # Mostrar resumen
                     ultimo_año = df_agregado['year'].max()
-                    año_objetivo = ultimo_año + 10  # Asumimos 10 años de predicción
+                    año_objetivo = ultimo_año + 10
                     pred_objetivo = df_predicciones[df_predicciones['año'] == año_objetivo].sort_values('prediccion_patentes', ascending=False)
                     
                     if not pred_objetivo.empty:
                         st.subheader(f"📊 Resumen de Predicciones {año_objetivo}")
                         
-                        col1, col2, col3, col4 = st.columns(4)
+                        col1, col2, col3 = st.columns(3)
                         
                         with col1:
                             st.metric(
@@ -1498,181 +1154,42 @@ def main():
                                 value=f"{df_predicciones['pais'].nunique()}"
                             )
                         
-                        with col4:
-                            confianza_alta = (pred_objetivo['confianza'] == 'alta').sum()
-                            st.metric(
-                                label="Predicciones Alta Confianza",
-                                value=f"{confianza_alta}"
+                        fig1, fig2 = crear_visualizacion_predicciones(df_predicciones)
+                        
+                        if fig1 is not None:
+                            st.plotly_chart(fig1, use_container_width=True)
+                        
+                        if fig2 is not None:
+                            st.plotly_chart(fig2, use_container_width=True)
+                        
+                        st.subheader("📋 Datos Detallados de Predicciones")
+                        
+                        año_filtro = st.selectbox(
+                            "Filtrar por año:",
+                            options=['Todos'] + sorted(df_predicciones['año'].unique().tolist()),
+                            index=0
+                        )
+                        
+                        if año_filtro == 'Todos':
+                            datos_filtrados = df_predicciones
+                        else:
+                            datos_filtrados = df_predicciones[df_predicciones['año'] == int(año_filtro)]
+                        
+                        if not datos_filtrados.empty:
+                            st.dataframe(
+                                datos_filtrados.sort_values(['año', 'prediccion_patentes'], ascending=[True, False]).rename(
+                                    columns={
+                                        'pais': 'País',
+                                        'año': 'Año',
+                                        'prediccion_patentes': 'Patentes Predichas',
+                                        'tendencia': 'Tendencia',
+                                        'confianza': 'Confianza'
+                                    }
+                                ).style.format({
+                                    'Patentes Predichas': '{:,.0f}'
+                                }),
+                                use_container_width=True
                             )
-                        
-                        # Tabs para diferentes visualizaciones
-                        tab_viz1, tab_viz2, tab_viz3 = st.tabs([
-                            "📈 Evolución Temporal",
-                            "📊 Análisis Detallado",
-                            "📋 Datos Completos"
-                        ])
-                        
-                        with tab_viz1:
-                            # Mostrar visualizaciones básicas
-                            fig1, fig2 = visualizar_predicciones_interactivas(df_predicciones)
-                            
-                            if fig1 is not None:
-                                st.plotly_chart(fig1, use_container_width=True)
-                            
-                            if fig2 is not None:
-                                st.plotly_chart(fig2, use_container_width=True)
-                                
-                                # Mostrar tabla de datos para el gráfico de evolución
-                                st.subheader("📋 Datos de Evolución - Top 3 Países")
-                                top_3_paises = pred_objetivo['pais'].head(3).tolist()
-                                
-                                for pais in top_3_paises:
-                                    datos_pais = df_predicciones[df_predicciones['pais'] == pais].sort_values('año')
-                                    if not datos_pais.empty:
-                                        st.write(f"**{pais}**")
-                                        st.dataframe(
-                                            datos_pais[['año', 'prediccion_patentes', 'tendencia', 'confianza']].rename(
-                                                columns={
-                                                    'año': 'Año',
-                                                    'prediccion_patentes': 'Patentes Predichas',
-                                                    'tendencia': 'Tendencia',
-                                                    'confianza': 'Confianza'
-                                                }
-                                            ).style.format({
-                                                'Patentes Predichas': '{:,.0f}'
-                                            }),
-                                            use_container_width=True,
-                                            hide_index=True
-                                        )
-                        
-                        with tab_viz2:
-                            # Visualización detallada
-                            fig_detallada = crear_visualizacion_detallada_predicciones(df_predicciones)
-                            
-                            if fig_detallada is not None:
-                                st.plotly_chart(fig_detallada, use_container_width=True)
-                            
-                            # Análisis adicional
-                            st.subheader("📊 Análisis Comparativo")
-                            
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                # Países con mayor crecimiento proyectado
-                                crecimiento_paises = []
-                                for pais in df_predicciones['pais'].unique():
-                                    datos_pais = df_predicciones[df_predicciones['pais'] == pais].sort_values('año')
-                                    if len(datos_pais) >= 2:
-                                        inicio = datos_pais.iloc[0]['prediccion_patentes']
-                                        fin = datos_pais.iloc[-1]['prediccion_patentes']
-                                        if inicio > 0:
-                                            crecimiento = ((fin - inicio) / inicio) * 100
-                                            crecimiento_paises.append({
-                                                'pais': pais,
-                                                'crecimiento_%': crecimiento,
-                                                'inicio': inicio,
-                                                'fin': fin
-                                            })
-                                
-                                if crecimiento_paises:
-                                    df_crecimiento = pd.DataFrame(crecimiento_paises).sort_values('crecimiento_%', ascending=False).head(5)
-                                    st.write("🚀 Top 5 Países - Mayor Crecimiento Proyectado")
-                                    st.dataframe(
-                                        df_crecimiento[['pais', 'crecimiento_%', 'inicio', 'fin']].rename(
-                                            columns={
-                                                'pais': 'País',
-                                                'crecimiento_%': 'Crecimiento %',
-                                                'inicio': f'Inicio ({ultimo_año+1})',
-                                                'fin': f'Fin ({año_objetivo})'
-                                            }
-                                        ).style.format({
-                                            'Crecimiento %': '{:.1f}%',
-                                            f'Inicio ({ultimo_año+1})': '{:,.0f}',
-                                            f'Fin ({año_objetivo})': '{:,.0f}'
-                                        }),
-                                        use_container_width=True,
-                                        hide_index=True
-                                    )
-                            
-                            with col2:
-                                # Distribución por confianza
-                                confianza_dist = df_predicciones['confianza'].value_counts()
-                                st.write("🎯 Distribución por Nivel de Confianza")
-                                st.dataframe(
-                                    pd.DataFrame({
-                                        'Nivel Confianza': confianza_dist.index,
-                                        'Cantidad': confianza_dist.values,
-                                        'Porcentaje': (confianza_dist.values / confianza_dist.values.sum() * 100)
-                                    }).style.format({
-                                        'Porcentaje': '{:.1f}%'
-                                    }),
-                                    use_container_width=True,
-                                    hide_index=True
-                                )
-                        
-                        with tab_viz3:
-                            # Tabla detallada de predicciones
-                            st.subheader("📋 Datos Detallados de Predicciones")
-                            
-                            col1, col2 = st.columns(2)
-                            
-                            with col1:
-                                año_filtro = st.selectbox(
-                                    "Filtrar por año:",
-                                    options=['Todos'] + sorted(df_predicciones['año'].unique().tolist()),
-                                    index=0,
-                                    key="año_filtro_detallado"
-                                )
-                            
-                            with col2:
-                                pais_filtro = st.selectbox(
-                                    "Filtrar por país:",
-                                    options=['Todos'] + sorted(df_predicciones['pais'].unique().tolist()),
-                                    index=0,
-                                    key="pais_filtro_detallado"
-                                )
-                            
-                            datos_filtrados = df_predicciones.copy()
-                            
-                            if año_filtro != 'Todos':
-                                datos_filtrados = datos_filtrados[datos_filtrados['año'] == int(año_filtro)]
-                            
-                            if pais_filtro != 'Todos':
-                                datos_filtrados = datos_filtrados[datos_filtrados['pais'] == pais_filtro]
-                            
-                            if not datos_filtrados.empty:
-                                st.dataframe(
-                                    datos_filtrados.sort_values(['año', 'prediccion_patentes'], ascending=[True, False]).rename(
-                                        columns={
-                                            'pais': 'País',
-                                            'año': 'Año',
-                                            'prediccion_patentes': 'Patentes Predichas',
-                                            'tendencia': 'Tendencia',
-                                            'confianza': 'Confianza',
-                                            'años_desde_base': 'Años desde Base'
-                                        }
-                                    ).style.format({
-                                        'Patentes Predichas': '{:,.0f}',
-                                        'Años desde Base': '{:.0f}'
-                                    }),
-                                    use_container_width=True,
-                                    height=400
-                                )
-                                
-                                # Botón para descargar datos
-                                csv = datos_filtrados.to_csv(index=False)
-                                st.download_button(
-                                    label="📥 Descargar datos como CSV",
-                                    data=csv,
-                                    file_name=f"predicciones_patentes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                                    mime="text/csv",
-                                    use_container_width=True
-                                )
-                            else:
-                                st.info(f"ℹ️ No hay predicciones para los filtros seleccionados")
-                    
-                    else:
-                        st.warning(f"⚠ No hay predicciones disponibles para el año {año_objetivo}")
     
     elif pagina_seleccionada == "🔍 Análisis por País":
         st.header("🔍 Análisis Detallado por País")
@@ -1684,7 +1201,7 @@ def main():
         df_agregado = st.session_state['df_agregado']
         df_predicciones = st.session_state.get('df_predicciones', None)
         
-        st.subheader("🇺🇸 Analizar País Específico")
+        st.subheader("Analizar País Específico")
         
         paises_disponibles = sorted(df_agregado['assignee_country'].unique())
         
@@ -1710,7 +1227,6 @@ def main():
                     )
         
         if pais_seleccionado:
-            # Obtener datos del país
             datos_pais = df_agregado[df_agregado['assignee_country'] == pais_seleccionado].sort_values('year')
             
             if not datos_pais.empty:
@@ -1723,7 +1239,6 @@ def main():
                     )
                 
                 with col2:
-                    # CORRECCIÓN: Sumar datos anuales (no acumulados)
                     total_patentes_pais = datos_pais['num_patentes'].sum()
                     st.metric(
                         label="Total Patentes",
@@ -1744,7 +1259,6 @@ def main():
                             value="N/A"
                         )
                 
-                # Gráfico de evolución
                 fig = px.line(
                     datos_pais,
                     x='year',
@@ -1753,7 +1267,6 @@ def main():
                     markers=True
                 )
                 
-                # Añadir predicciones si están disponibles
                 if df_predicciones is not None and not df_predicciones.empty:
                     pred_pais = df_predicciones[df_predicciones['pais'] == pais_seleccionado].sort_values('año')
                     
@@ -1773,23 +1286,6 @@ def main():
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
-                
-                # Mostrar tabla de datos históricos
-                st.subheader("📋 Datos Históricos Detallados")
-                st.dataframe(
-                    datos_pais[['year', 'num_patentes', 'avg_claims', 'unique_sections']].rename(
-                        columns={
-                            'year': 'Año',
-                            'num_patentes': 'Patentes',
-                            'avg_claims': 'Claims Promedio',
-                            'unique_sections': 'Secciones Únicas'
-                        }
-                    ).style.format({
-                        'Patentes': '{:,.0f}',
-                        'Claims Promedio': '{:.1f}'
-                    }),
-                    use_container_width=True
-                )
             else:
                 st.warning(f"⚠ No hay datos disponibles para {pais_seleccionado}")
 
@@ -1798,11 +1294,9 @@ def main():
 # ============================================================================
 
 if __name__ == "__main__":
-    # Inicializar session state si no existe
     if 'datos_cargados' not in st.session_state:
         st.session_state['datos_cargados'] = False
     if 'debug_mode' not in st.session_state:
         st.session_state['debug_mode'] = False
     
-    # Ejecutar aplicación
     main()
