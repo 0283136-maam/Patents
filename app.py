@@ -1072,8 +1072,8 @@ def main():
                     key="num_paises_prediccion"
                 )
             
-            # Guardar el horizonte en session state
-            st.session_state['horizonte_prediccion'] = horizonte_prediccion
+            # CORRECCIÓN: Usar un nombre diferente en session_state
+            st.session_state['current_prediction_horizon'] = horizonte_prediccion
             
             if st.button("🚀 Entrenar Modelos y Generar Predicciones", type="primary", use_container_width=True):
                 
@@ -1137,7 +1137,8 @@ def main():
                 st.info("ℹ️ Primero entrena los modelos en la pestaña 'Entrenar Modelos'.")
             else:
                 df_predicciones = st.session_state['df_predicciones']
-                horizonte_prediccion = st.session_state.get('horizonte_prediccion', 6)
+                # CORRECCIÓN: Usar el nombre diferente
+                horizonte_prediccion = st.session_state.get('current_prediction_horizon', 6)
                 
                 if df_predicciones.empty:
                     st.warning("⚠ No hay predicciones disponibles. Intenta entrenar los modelos nuevamente.")
@@ -1226,7 +1227,8 @@ def main():
         
         df_agregado = st.session_state['df_agregado']
         df_predicciones = st.session_state.get('df_predicciones', None)
-        horizonte_prediccion = st.session_state.get('horizonte_prediccion', 6)
+        # CORRECCIÓN: Usar el nombre diferente
+        horizonte_prediccion = st.session_state.get('current_prediction_horizon', 6)
         
         st.subheader("Analizar País Específico")
         
@@ -1356,7 +1358,8 @@ if __name__ == "__main__":
         st.session_state['datos_cargados'] = False
     if 'debug_mode' not in st.session_state:
         st.session_state['debug_mode'] = False
-    if 'horizonte_prediccion' not in st.session_state:
-        st.session_state['horizonte_prediccion'] = 5  # Valor por defecto
+    # CORRECCIÓN: Usar el nombre diferente
+    if 'current_prediction_horizon' not in st.session_state:
+        st.session_state['current_prediction_horizon'] = 6  # Valor por defecto
     
     main()
