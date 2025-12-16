@@ -27,73 +27,75 @@ import json
 import os
 import ssl
 import certifi
+import urllib3
+
+warnings.filterwarnings('ignore')
 
 # ============================================================================
-# CONFIGURACIÓN PARA EVITAR ERRORES DE CERTIFICADO FORTINET
+# CONFIGURACIÓN CRÍTICA PARA FORTINET Y GCS
 # ============================================================================
 
-# Configurar certificados SSL para evitar problemas con Fortinet
+# Configurar SSL para evitar problemas con Fortinet
 os.environ['SSL_CERT_FILE'] = certifi.where()
 os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
 
-# Deshabilitar verificación SSL estricta (solo para desarrollo/testing)
-# NOTA: Esto puede ser necesario en redes corporativas con Fortinet
+# IMPORTANTE: Deshabilitar verificación SSL temporalmente para Fortinet
+# (Solo para desarrollo, en producción usa certificados válidos)
 ssl._create_default_https_context = ssl._create_unverified_context
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Configurar para evitar timeout de metadata service
+# Evitar timeout de metadata service de Google
 os.environ["NO_GCE_CHECK"] = "true"
+os.environ["GOOGLE_CLOUD_PROJECT"] = "warm-physics-474702-q3"
 
 # ============================================================================
-# IMPORTS CON MANEJO DE ERRORES
+# CONFIGURACIÓN DE GCS CON CREDENCIALES EXPLÍCITAS
 # ============================================================================
 
 try:
     from google.cloud import storage
     from google.oauth2 import service_account
-    import google.auth
+    import google.auth.transport.requests
     
     GCS_AVAILABLE = True
     
     @st.cache_resource
     def get_gcs_client():
-        """Obtener cliente GCS usando Streamlit Secrets con manejo de Fortinet"""
+        """Obtener cliente GCS con credenciales explícitas"""
         try:
+            # Verificar si hay credenciales en Streamlit Secrets
             if 'gcp_service_account' not in st.secrets:
-                st.sidebar.warning("⚠ No hay credenciales en Secrets. Usando datos de ejemplo.")
+                st.sidebar.error("❌ No hay credenciales GCP en Secrets")
                 return None
             
-            # Configurar autenticación explícita para evitar problemas de red
-            creds_dict = dict(st.secrets["gcp_service_account"])
+            # Obtener credenciales de Secrets
+            creds_info = dict(st.secrets["gcp_service_account"])
             
-            # Configurar opciones de conexión para redes con proxy/Fortinet
-            client_options = {
-                'quota_project_id': creds_dict.get('project_id', 'warm-physics-474702-q3'),
-                'scopes': ['https://www.googleapis.com/auth/cloud-platform']
-            }
+            # Crear credenciales de servicio explícitas
+            credentials = service_account.Credentials.from_service_account_info(creds_info)
             
-            # Crear credenciales
-            credentials = service_account.Credentials.from_service_account_info(
-                creds_dict,
-                scopes=client_options['scopes']
-            )
-            
-            # Crear cliente con configuración específica
+            # Configurar cliente con credenciales explícitas
             client = storage.Client(
                 credentials=credentials,
-                project=client_options['quota_project_id']
+                project=creds_info.get('project_id', 'warm-physics-474702-q3')
             )
             
-            st.sidebar.success("✅ Cliente GCS configurado")
+            # Probar conexión
+            try:
+                buckets = list(client.list_buckets(max_results=1))
+                st.sidebar.success(f"✅ Conectado a GCS. Bucket disponible: {buckets[0].name if buckets else 'N/A'}")
+            except Exception as e:
+                st.sidebar.warning(f"⚠ Conexión establecida pero error en listar buckets: {str(e)[:100]}")
+            
             return client
             
         except Exception as e:
-            st.sidebar.error(f"❌ Error GCS: {str(e)[:150]}")
-            st.sidebar.info("Usando datos de ejemplo...")
+            st.sidebar.error(f"❌ Error crítico GCS: {str(e)[:200]}")
             return None
             
-except ImportError:
+except ImportError as e:
     GCS_AVAILABLE = False
-    st.sidebar.warning("⚠ google-cloud-storage no está instalado. Usando datos de ejemplo.")
+    st.sidebar.error(f"❌ Error importando google-cloud-storage: {str(e)}")
 
 # Configuración de la página
 st.set_page_config(
@@ -1158,5 +1160,6 @@ if __name__ == "__main__":
     # Ejecutar aplicación
 
     main()
+
 
 
