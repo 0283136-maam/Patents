@@ -25,50 +25,70 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 import base64
 import json
 import os
-
-warnings.filterwarnings('ignore')
+import ssl
+import certifi
 
 # ============================================================================
-# CONFIGURACIÓN DE AUTENTICACIÓN GCS CON STREAMLIT SECRETS
+# CONFIGURACIÓN PARA EVITAR ERRORES DE CERTIFICADO FORTINET
 # ============================================================================
+
+# Configurar certificados SSL para evitar problemas con Fortinet
+os.environ['SSL_CERT_FILE'] = certifi.where()
+os.environ['REQUESTS_CA_BUNDLE'] = certifi.where()
+
+# Deshabilitar verificación SSL estricta (solo para desarrollo/testing)
+# NOTA: Esto puede ser necesario en redes corporativas con Fortinet
+ssl._create_default_https_context = ssl._create_unverified_context
 
 # Configurar para evitar timeout de metadata service
 os.environ["NO_GCE_CHECK"] = "true"
 
-# Verificar si google-cloud-storage está disponible y configurar autenticación
+# ============================================================================
+# IMPORTS CON MANEJO DE ERRORES
+# ============================================================================
+
 try:
     from google.cloud import storage
     from google.oauth2 import service_account
+    import google.auth
     
     GCS_AVAILABLE = True
     
     @st.cache_resource
     def get_gcs_client():
-        """Obtener cliente GCS usando Streamlit Secrets"""
+        """Obtener cliente GCS usando Streamlit Secrets con manejo de Fortinet"""
         try:
-            # Verificar si existen secrets
-            if 'gcp_service_account' in st.secrets:
-                st.sidebar.success("✅ Usando credenciales de Secrets")
-                
-                # Convertir secrets a diccionario
-                creds_dict = dict(st.secrets["gcp_service_account"])
-                
-                # Crear credenciales
-                credentials = service_account.Credentials.from_service_account_info(creds_dict)
-                
-                # Crear cliente
-                client = storage.Client(
-                    credentials=credentials,
-                    project=creds_dict.get('project_id', 'warm-physics-474702-q3')
-                )
-                
-                return client
-            else:
-                st.sidebar.warning("⚠ No se encontraron credenciales en Secrets")
+            if 'gcp_service_account' not in st.secrets:
+                st.sidebar.warning("⚠ No hay credenciales en Secrets. Usando datos de ejemplo.")
                 return None
-                
+            
+            # Configurar autenticación explícita para evitar problemas de red
+            creds_dict = dict(st.secrets["gcp_service_account"])
+            
+            # Configurar opciones de conexión para redes con proxy/Fortinet
+            client_options = {
+                'quota_project_id': creds_dict.get('project_id', 'warm-physics-474702-q3'),
+                'scopes': ['https://www.googleapis.com/auth/cloud-platform']
+            }
+            
+            # Crear credenciales
+            credentials = service_account.Credentials.from_service_account_info(
+                creds_dict,
+                scopes=client_options['scopes']
+            )
+            
+            # Crear cliente con configuración específica
+            client = storage.Client(
+                credentials=credentials,
+                project=client_options['quota_project_id']
+            )
+            
+            st.sidebar.success("✅ Cliente GCS configurado")
+            return client
+            
         except Exception as e:
-            st.sidebar.error(f"❌ Error al crear cliente GCS: {str(e)[:100]}")
+            st.sidebar.error(f"❌ Error GCS: {str(e)[:150]}")
+            st.sidebar.info("Usando datos de ejemplo...")
             return None
             
 except ImportError:
@@ -1138,4 +1158,5 @@ if __name__ == "__main__":
     # Ejecutar aplicación
 
     main()
+
 
