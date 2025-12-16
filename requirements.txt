@@ -5,5 +5,4 @@ google-cloud-storage
 pandas
 matplotlib
 numpy
-scikit-learn
 plotly==6.5.0
