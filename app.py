@@ -96,7 +96,7 @@ def cargar_datos_desde_gcs():
                     st.write(f"⚠ {nombre_archivo} no encontrado")
                     
             except Exception as e:
-                st.write(f"❌ Error con {nombre_archivo}: {str(e)[:50]}")
+                st.write(f"❌ Error con {nombre_archivo}: {str(e)[:500]}")
                 continue
         
         if not todos_datos:
@@ -1104,4 +1104,5 @@ if __name__ == "__main__":
     
     # Ejecutar aplicación
     main()
+
 
