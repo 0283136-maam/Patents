@@ -60,7 +60,7 @@ try:
             # 1. VERIFICAR QUE EXISTEN SECRETS
             if 'gcp_service_account' not in st.secrets:
                 st.sidebar.error("❌ ERROR: No hay credenciales en Streamlit Secrets")
-                st.sidebar.info("Configura 'gcp_service_account' en .streamlit/secrets.toml")
+                st.sidebar.info("Configura 'gcp_service_account' en secrets.toml")
                 return None
             
             # 2. OBTENER CREDENCIALES DE SECRETS
@@ -513,3 +513,4 @@ if __name__ == "__main__":
     
     # Ejecutar
     main()
+
